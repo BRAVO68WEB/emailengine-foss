@@ -181,7 +181,7 @@
         </div>
     </div>
 
-    <div class="card mb-4">
+    <div id="queue_settings" class="card mb-4">
         <div class="card-header py-3 d-flex flex-row align-items-center justify-content-between">
             <h6 class="m-0 font-weight-bold text-primary">Queue settings</h6>
             <div class="dropdown no-arrow">
@@ -220,7 +220,31 @@
         </div>
     </div>
 
-    <div class="card mb-4">
+    <div id="submission_settings" class="card mb-4">
+        <div class="card-header py-3">
+            <h6 class="m-0 font-weight-bold text-primary">Email submission settings</h6>
+        </div>
+        <div class="card-body">
+            <div class="form-group">
+
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
+                        target="_blank">deliveryAttempts</a>]</div>
+
+                <label for="settingsDeliveryAttempts">How many times to retry a failed email sending</label>
+                <input type="number" min="0" class="form-control {{#if errors.deliveryAttempts}}is-invalid{{/if}}"
+                    id="settingsDeliveryAttempts" name="deliveryAttempts" value="{{values.deliveryAttempts}}"
+                    data-lpignore="true" autocomplete="off" />
+                {{#if errors.deliveryAttempts}}
+                <span class="invalid-feedback">{{errors.deliveryAttempts}}</span>
+                {{/if}}
+                <small class="form-text text-muted">If EmailEngine cannot deliver an email to an SMTP server, it will
+                    attempt to retry the action for the specified number of attempts.</small>
+            </div>
+
+        </div>
+    </div>
+
+    <div id="templates_settings" class="card mb-4">
         <div class="card-header py-3 d-flex flex-row align-items-center justify-content-between">
             <h6 class="m-0 font-weight-bold text-primary">Templates</h6>
             <div class="dropdown no-arrow">
@@ -244,7 +268,7 @@
                 <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
                         target="_blank">templateHeader</a>]</div>
 
-                <label for="templateHeaderElement">Template header for public pages (HTML code)</label>
+                <label>Template header for public pages (HTML code)</label>
 
                 <input type="hidden" id="templateHeaderElement" name="templateHeader" value="{{values.templateHeader}}">
                 <div id="editor-html" class="code-editor" style="height: 10rem;"></div>
@@ -308,11 +332,25 @@
         </div>
     </div>
 
-    <div class="card mb-4" id="labs">
+    <div class="card mb-4" id="openai_settings">
         <div class="card-header py-3">
             <h6 class="m-0 font-weight-bold text-primary">OpenAI <span class="badge badge-dark">beta</span></h6>
         </div>
         <div class="card-body">
+
+            {{#if openAiError}}
+            <div class="mt-3 mb-3 alert alert-danger clear-alert-btn" data-clear-alert="open-ai">
+                <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+
+                <p><strong>NB!</strong> The last attempted OpenAI request failed with the response below.</p>
+                <hr>
+                <p class="mb-0">
+                    <code>{{openAiError.message}}{{#if openAiError.code}} ({{openAiError.code}}){{/if}}</code>
+                </p>
+            </div>
+            {{/if}}
 
             <p>The following options are not well tested and might change in the futurue. Use these with care.</p>
 
@@ -341,32 +379,15 @@
                 <input type="checkbox" class="form-check-input {{#if errors.generateEmailSummary}}is-invalid{{/if}}"
                     id="generateEmailSummary" name="generateEmailSummary" {{#if
                     values.generateEmailSummary}}checked{{/if}} />
-                <label class="form-check-label" for="generateEmailSummary">Generate summaries with OpenAI</label>
+                <label class="form-check-label" for="generateEmailSummary">Analyze email content with OpenAI</label>
                 {{#if errors.generateEmailSummary}}
                 <span class="invalid-feedback">{{errors.generateEmailSummary}}</span>
                 {{/if}}
-                <small class="form-text text-muted">EmailEngine will use OpenAI ChatGPT to <a
+                <small class="form-text text-muted">EmailEngine will use OpenAI ChatGPT <a
                         href="https://docs.emailengine.app/generating-summaries-of-new-emails-using-chatgpt/"
-                        target="_blank" referrerpolicy="{{referrerPolicy}}">generate a summary and sentiment
-                        assessment</a> for incoming emails if this option is enabled. Requires a valid OpenAI API
-                    key.</small>
-            </div>
-
-            <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
-                        target="_blank">generateRiskAssessment</a>]</div>
-
-                <input type="checkbox" class="form-check-input {{#if errors.generateRiskAssessment}}is-invalid{{/if}}"
-                    id="generateRiskAssessment" name="generateRiskAssessment" {{#if
-                    values.generateRiskAssessment}}checked{{/if}} />
-                <label class="form-check-label" for="generateRiskAssessment">Generate risk assessment with
-                    OpenAI</label>
-                {{#if errors.generateRiskAssessment}}
-                <span class="invalid-feedback">{{errors.generateRiskAssessment}}</span>
-                {{/if}}
-                <small class="form-text text-muted">EmailEngine will use OpenAI ChatGPT to generate a risk assessment
-                    for incoming emails to detect potential phishing and scam emails if this option is enabled. Requires
-                    a valid OpenAI API key.</small>
+                        target="_blank" referrerpolicy="{{referrerPolicy}}">to generate</a> a summary, a sentiment
+                    assessment and a security assessment for incoming emails if this option is enabled. Requires
+                    a valid OpenAI API key, preferrably for GPT-4.</small>
             </div>
 
             <div class="form-group">
@@ -489,6 +510,8 @@
     document.getElementById('settings-form').addEventListener('submit', () => {
         document.getElementById('templateHeaderElement').value = editorHtml.getValue();
     });
+
+
 
 
 </script>
