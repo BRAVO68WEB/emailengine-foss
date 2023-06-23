@@ -50,13 +50,16 @@ const {
     ACCOUNT_ADDED_NOTIFY,
     ACCOUNT_DELETED_NOTIFY,
     LIST_UNSUBSCRIBE_NOTIFY,
-    LIST_SUBSCRIBE_NOTIFY
+    LIST_SUBSCRIBE_NOTIFY,
+    FETCH_TIMEOUT
 } = require('./lib/consts');
 
 const { webhooks: Webhooks } = require('./lib/webhooks');
-const nodeFetch = require('node-fetch');
+const { riskAnalysis, generateSummary } = require('@postalsys/email-ai-tools');
+const { fetch: fetchCmd, Agent } = require('undici');
+const fetchAgent = new Agent({ connect: { timeout: FETCH_TIMEOUT } });
+
 const v8 = require('node:v8');
-const fetchCmd = global.fetch || nodeFetch;
 
 const Bugsnag = require('@bugsnag/js');
 if (readEnvValue('BUGSNAG_API_KEY')) {
@@ -1015,13 +1018,22 @@ let licenseCheckHandler = async opts => {
             checkKv = false;
         }
 
+        let ks = await redis.hget(`${REDIS_PREFIX}settings`, 'ks');
+        if (ks && typeof ks === 'string') {
+            let ksDate = new Date(parseInt(ks, 16));
+            if (ksDate < now) {
+                checkKv = true;
+            }
+        } else {
+            checkKv = true;
+        }
+
         if (
             checkKv &&
             licenseInfo.active &&
             !(licenseInfo.details && licenseInfo.details.expires) &&
             (await redis.hUpdateBigger(`${REDIS_PREFIX}settings`, 'subcheck', now - subscriptionCheckTimeout, now))
         ) {
-            // validate license
             try {
                 let res = await fetchCmd(`https://postalsys.com/licenses/validate`, {
                     method: 'post',
@@ -1033,7 +1045,8 @@ let licenseCheckHandler = async opts => {
                         key: licenseInfo.details.key,
                         version: packageData.version,
                         app: '@postalsys/emailengine-app'
-                    })
+                    }),
+                    dispatcher: fetchAgent
                 });
 
                 let data = await res.json();
@@ -1053,6 +1066,9 @@ let licenseCheckHandler = async opts => {
                 } else {
                     await redis.hdel(`${REDIS_PREFIX}settings`, 'subexp');
                     await redis.hset(`${REDIS_PREFIX}settings`, 'kv', Buffer.from(packageData.version).toString('hex'));
+                    if (data.validatedUntil) {
+                        await redis.hset(`${REDIS_PREFIX}settings`, 'ks', new Date(data.validatedUntil).getTime().toString(16));
+                    }
                 }
             } catch (err) {
                 logger.error({ msg: 'Failed to validate license', err });
@@ -1353,6 +1369,15 @@ async function onCommand(worker, message) {
             }
 
             return false;
+        }
+
+        // run these in main process to avoid polluting RAM with the memory hungry tokenization library
+        case 'generateSummary': {
+            return await generateSummary(...message.args);
+        }
+
+        case 'riskAnalysis': {
+            return await riskAnalysis(...message.args);
         }
 
         case 'threads': {

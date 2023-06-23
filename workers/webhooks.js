@@ -36,11 +36,11 @@ const { redis, queueConf } = require('../lib/db');
 const { Worker } = require('bullmq');
 const settings = require('../lib/settings');
 
-const { REDIS_PREFIX, ACCOUNT_DELETED_NOTIFY, MESSAGE_NEW_NOTIFY } = require('../lib/consts');
+const { REDIS_PREFIX, ACCOUNT_DELETED_NOTIFY, MESSAGE_NEW_NOTIFY, FETCH_TIMEOUT } = require('../lib/consts');
 const he = require('he');
 
-const nodeFetch = require('node-fetch');
-const fetchCmd = global.fetch || nodeFetch;
+const { fetch: fetchCmd, Agent } = require('undici');
+const fetchAgent = new Agent({ connect: { timeout: FETCH_TIMEOUT } });
 
 config.queues = config.queues || {
     notify: 1
@@ -130,7 +130,6 @@ const notifyWorker = new Worker(
             customRoute = await Webhooks.getMeta(job.data._route.id);
             customMapping = job.data._route.mapping;
             delete job.data._route;
-
             if (!customRoute || !customRoute.enabled || !customRoute.targetUrl) {
                 return;
             }
@@ -236,7 +235,10 @@ const notifyWorker = new Worker(
 
         let headers = {
             'Content-Type': 'application/json',
-            'User-Agent': `${packageData.name}/${packageData.version} (+${packageData.homepage})`
+            'User-Agent': `${packageData.name}/${packageData.version} (+${packageData.homepage})`,
+            'X-EE-Wh-Id': (job.id || '').toString(),
+            'X-EE-Wh-Attempts-Made': (job.attemptsMade || 0).toString(),
+            'X-EE-Wh-Queued-Time': Math.round(Math.max(0, (Date.now() - job.timestamp) / 1000)) + 's'
         };
 
         let parsed = new URL(webhooks);
@@ -257,6 +259,7 @@ const notifyWorker = new Worker(
         }
 
         if (customRoute) {
+            headers['X-EE-Wh-Custom-Route'] = customRoute.id;
             for (let header of customRoute.customHeaders || []) {
                 headers[header.key] = header.value;
             }
@@ -270,7 +273,12 @@ const notifyWorker = new Worker(
         let start = Date.now();
         let duration;
 
-        let body = Buffer.from(JSON.stringify(customMapping || job.data));
+        let webhookPayload = customMapping || job.data;
+        if (webhookPayload.eventId) {
+            headers['X-EE-Wh-Event-Id'] = webhookPayload.eventId;
+            webhookPayload.eventId = undefined; // not included in JSON
+        }
+        let body = Buffer.from(JSON.stringify(webhookPayload));
 
         try {
             let res;
@@ -278,7 +286,8 @@ const notifyWorker = new Worker(
                 res = await fetchCmd(parsed.toString(), {
                     method: 'post',
                     body,
-                    headers
+                    headers,
+                    dispatcher: fetchAgent
                 });
                 duration = Date.now() - start;
             } catch (err) {
@@ -410,9 +419,9 @@ route: customRoute && customRoute.id,
     },
     Object.assign(
         {
-            concurrency: NOTIFY_QC
+            concurrency: Number(NOTIFY_QC) || 1
         },
-        queueConf
+        queueConf || {}
     )
 );
 
