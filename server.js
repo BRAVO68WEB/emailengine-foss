@@ -55,7 +55,15 @@ const {
 } = require('./lib/consts');
 
 const { webhooks: Webhooks } = require('./lib/webhooks');
-const { riskAnalysis, generateSummary } = require('@postalsys/email-ai-tools');
+const {
+    generateSummary,
+    generateEmbeddings,
+    getChunkEmbeddings,
+    embeddingsQuery,
+    questionQuery,
+    listModels: openAiListModels,
+    DEFAULT_USER_PROMPT: openAiDefaultPrompt
+} = require('@postalsys/email-ai-tools');
 const { fetch: fetchCmd, Agent } = require('undici');
 const fetchAgent = new Agent({ connect: { timeout: FETCH_TIMEOUT } });
 
@@ -160,7 +168,7 @@ config.workers.webhooks = Number(readEnvValue('EENGINE_WORKERS_WEBHOOKS')) || co
 config.workers.submit = Number(readEnvValue('EENGINE_WORKERS_SUBMIT')) || config.workers.submit || 1;
 
 config.api.port =
-    (readEnvValue('EENGINE_PORT') && Number(readEnvValue('EENGINE_PORT'))) || (readEnvValue('PORT') && Number(readEnvValue('PORT'))) || config.api.port;
+    (hasEnvValue('EENGINE_PORT') && Number(readEnvValue('EENGINE_PORT'))) || (hasEnvValue('PORT') && Number(readEnvValue('PORT'))) || config.api.port;
 config.api.host = readEnvValue('EENGINE_HOST') || config.api.host;
 
 config.log.level = readEnvValue('EENGINE_LOG_LEVEL') || config.log.level;
@@ -183,6 +191,7 @@ const IMAP_PROXY_PROXY = hasEnvValue('EENGINE_IMAP_PROXY_PROXY')
     ? getBoolean(readEnvValue('EENGINE_IMAP_PROXY_PROXY'))
     : getBoolean(config['imap-proxy'].proxy);
 
+const HAS_API_PROXY_SET = hasEnvValue('EENGINE_API_PROXY') || typeof config.api.proxy !== 'undefined';
 const API_PROXY = hasEnvValue('EENGINE_API_PROXY') ? getBoolean(readEnvValue('EENGINE_API_PROXY')) : getBoolean(config.api.proxy);
 
 logger.info({
@@ -248,7 +257,7 @@ if (preparedSettingsString) {
         preparedSettings = value;
     } catch (err) {
         logger.error({ msg: 'Received invalid settings string', input: preparedSettingsString, err });
-        process.exit(1);
+        logger.flush(() => process.exit(1));
     }
 }
 
@@ -262,7 +271,7 @@ if (preparedTokenString) {
         }
     } catch (err) {
         logger.error({ msg: 'Received invalid token string', input: preparedTokenString, err });
-        process.exit(1);
+        logger.flush(() => process.exit(1));
     }
 }
 
@@ -276,7 +285,7 @@ if (preparedPasswordString) {
         }
     } catch (err) {
         logger.error({ msg: 'Received invalid password string', input: preparedPasswordString, err });
-        process.exit(1);
+        logger.flush(() => process.exit(1));
     }
 }
 
@@ -367,6 +376,11 @@ const metrics = {
     redisUptimeInSeconds: new promClient.Gauge({
         name: 'redis_uptime_in_seconds',
         help: 'Redis uptime in seconds'
+    }),
+
+    redisPing: new promClient.Gauge({
+        name: 'redis_latency',
+        help: 'Redis latency in nanoseconds'
     }),
 
     redisRejectedConnectionsTotal: new promClient.Gauge({
@@ -470,6 +484,7 @@ let unassignCounter = new Map();
 let workerAssigned = new WeakMap();
 let onlineWorkers = new WeakSet();
 
+let imapInitialWorkersLoaded = false;
 let workers = new Map();
 let workersMeta = new WeakMap();
 let availableIMAPWorkers = new Set();
@@ -627,291 +642,324 @@ let spawnWorker = async type => {
 
     workers.get(type).add(worker);
 
-    worker.on('online', () => {
-        if (['smtp', 'imapProxy'].includes(type)) {
-            updateServerState(type, 'initializing').catch(err => logger.error({ msg: `Failed to update ${type} server state`, err }));
-        }
-        onlineWorkers.add(worker);
+    return new Promise((resolve, reject) => {
+        let isOnline = false;
+        let threadId = worker.threadId;
 
-        let workerMeta = workersMeta.has(worker) ? workersMeta.get(worker) : {};
-        workerMeta.online = Date.now();
-        workersMeta.set(worker, workerMeta);
-    });
-
-    let exitHandler = async exitCode => {
-        onlineWorkers.delete(worker);
-        metrics.threadStops.inc();
-
-        workers.get(type).delete(worker);
-
-        if (['smtp', 'imapProxy'].includes(type)) {
-            updateServerState(type, suspendedWorkerTypes.has(type) ? 'suspended' : 'exited');
-        }
-
-        if (type === 'imap') {
-            availableIMAPWorkers.delete(worker);
-
-            if (workerAssigned.has(worker)) {
-                let accountList = workerAssigned.get(worker);
-                workerAssigned.delete(worker);
-                accountList.forEach(account => {
-                    assigned.delete(account);
-                    let shouldReassign = false;
-                    // graceful reconnect
-                    countUnassignment(account)
-                        .then(sr => {
-                            shouldReassign = sr;
-                        })
-                        .catch(() => {
-                            shouldReassign = true;
-                        })
-                        .finally(() => {
-                            unassigned.add(account);
-                            if (shouldReassign) {
-                                assignAccounts().catch(err => logger.error({ msg: 'Failed to assign accounts', n: 1, err }));
-                            }
-                        });
-                });
+        worker.on('online', () => {
+            if (['smtp', 'imapProxy'].includes(type)) {
+                updateServerState(type, 'initializing').catch(err => logger.error({ msg: `Failed to update ${type} server state`, err }));
             }
-        }
+            onlineWorkers.add(worker);
 
-        if (isClosing) {
-            return;
-        }
+            let workerMeta = workersMeta.has(worker) ? workersMeta.get(worker) : {};
+            workerMeta.online = Date.now();
+            workersMeta.set(worker, workerMeta);
 
-        // spawning a new worker trigger reassign
-        if (suspendedWorkerTypes.has(type)) {
-            logger.info({ msg: 'Worker thread closed', exitCode, type });
-        } else {
-            logger.error({ msg: 'Worker exited', exitCode, type });
-        }
+            if (type !== 'imap') {
+                // imap workers need to wait until ready to accept accounts
+                isOnline = true;
+                resolve(threadId);
+            }
+        });
 
-        // trigger new spawn
-        await new Promise(r => setTimeout(r, 1000));
-        await spawnWorker(type);
-    };
+        let exitHandler = async exitCode => {
+            onlineWorkers.delete(worker);
+            metrics.threadStops.inc();
 
-    worker.on('exit', exitCode => {
-        exitHandler(exitCode).catch(err => {
-            logger.error({ msg: 'Failed to handle worker exit', exitCode, worker: worker.threadId, err });
+            workers.get(type).delete(worker);
+
+            if (['smtp', 'imapProxy'].includes(type)) {
+                updateServerState(type, suspendedWorkerTypes.has(type) ? 'suspended' : 'exited');
+            }
+
+            if (type === 'imap') {
+                availableIMAPWorkers.delete(worker);
+
+                if (workerAssigned.has(worker)) {
+                    let accountList = workerAssigned.get(worker);
+                    workerAssigned.delete(worker);
+                    accountList.forEach(account => {
+                        assigned.delete(account);
+                        let shouldReassign = false;
+                        // graceful reconnect
+                        countUnassignment(account)
+                            .then(sr => {
+                                shouldReassign = sr;
+                            })
+                            .catch(() => {
+                                shouldReassign = true;
+                            })
+                            .finally(() => {
+                                unassigned.add(account);
+                                if (shouldReassign) {
+                                    assignAccounts().catch(err => logger.error({ msg: 'Failed to assign accounts', n: 1, err }));
+                                }
+                            });
+                    });
+                }
+            }
+
+            if (isClosing) {
+                return;
+            }
+
+            // spawning a new worker trigger reassign
+            if (suspendedWorkerTypes.has(type)) {
+                logger.info({ msg: 'Worker thread closed', exitCode, type });
+            } else {
+                logger.error({ msg: 'Worker exited', exitCode, type });
+            }
+
+            // trigger new spawn
+            await new Promise(r => setTimeout(r, 1000));
+            await spawnWorker(type);
+        };
+
+        worker.on('exit', exitCode => {
+            if (!isOnline) {
+                let error = new Error(`Failed to start ${type} worker thread on initialization`);
+
+                error.workerType = type;
+                error.exitCode = exitCode;
+                error.threadId = threadId;
+
+                reject(error);
+            }
+
+            exitHandler(exitCode).catch(err => {
+                logger.error({ msg: 'Failed to handle worker exit', exitCode, type, worker: worker.threadId, err });
+            });
+        });
+
+        worker.on('message', message => {
+            let workerMeta = workersMeta.has(worker) ? workersMeta.get(worker) : {};
+            workerMeta.messages = workerMeta.messages ? ++workerMeta.messages : 1;
+            workersMeta.set(worker, workerMeta);
+
+            if (!message) {
+                return;
+            }
+
+            if (message.cmd === 'resp' && message.mid && callQueue.has(message.mid)) {
+                let { resolve, reject, timer } = callQueue.get(message.mid);
+                clearTimeout(timer);
+                callQueue.delete(message.mid);
+                if (message.error) {
+                    let err = new Error(message.error);
+                    if (message.code) {
+                        err.code = message.code;
+                    }
+                    if (message.statusCode) {
+                        err.statusCode = message.statusCode;
+                    }
+                    if (message.info) {
+                        err.info = message.info;
+                    }
+                    return reject(err);
+                } else {
+                    return resolve(message.response);
+                }
+            }
+
+            if (message.cmd === 'call' && message.mid) {
+                return onCommand(worker, message.message)
+                    .then(response => {
+                        let transferList;
+                        if (response && typeof response === 'object' && response._transfer === true) {
+                            if (typeof response._response === 'object' && response._response && response._response.buffer) {
+                                transferList = [response._response.buffer];
+                            }
+                            response = response._response;
+                        }
+
+                        let callPayload = {
+                            cmd: 'resp',
+                            mid: message.mid,
+                            response
+                        };
+
+                        try {
+                            postMessage(worker, callPayload, null, transferList);
+                        } catch (err) {
+                            if (Buffer.isBuffer(callPayload.response)) {
+                                callPayload.response = `Buffer <${callPayload.response.length}B>`;
+                            }
+
+                            logger.error({ msg: 'Failed to post state change to child', worker: worker.threadId, callPayload, err });
+                        }
+                    })
+                    .catch(err => {
+                        let callPayload = {
+                            cmd: 'resp',
+                            mid: message.mid,
+                            error: err.message,
+                            code: err.code,
+                            statusCode: err.statusCode,
+                            info: err.info
+                        };
+
+                        try {
+                            postMessage(worker, callPayload);
+                        } catch (err) {
+                            logger.error({ msg: 'Failed to post state change to child', worker: worker.threadId, callPayload, err });
+                        }
+                    });
+            }
+
+            switch (message.cmd) {
+                case 'metrics': {
+                    let statUpdateKey = false;
+                    let accountUpdateKey = false;
+
+                    let { account } = message.meta || {};
+
+                    switch (message.key) {
+                        // gather for dashboard counter
+                        case 'webhooks': {
+                            let { status } = message.args[0] || {};
+                            statUpdateKey = `${message.key}:${status}`;
+                            break;
+                        }
+
+                        case 'webhookReq': {
+                            break;
+                        }
+
+                        case 'events': {
+                            let { event } = message.args[0] || {};
+                            if (account) {
+                                accountUpdateKey = `${message.key}:${event}`;
+                            }
+
+                            switch (event) {
+                                case MESSAGE_NEW_NOTIFY:
+                                case MESSAGE_DELETED_NOTIFY:
+                                case CONNECT_ERROR_NOTIFY:
+                                    statUpdateKey = `${message.key}:${event}`;
+                                    break;
+                            }
+                            break;
+                        }
+
+                        case 'apiCall': {
+                            let { statusCode } = message.args[0] || {};
+                            let success = statusCode >= 200 && statusCode < 300;
+                            statUpdateKey = `${message.key}:${success ? 'success' : 'fail'}`;
+                            break;
+                        }
+
+                        case 'queuesProcessed': {
+                            let { queue, status } = message.args[0] || {};
+                            if (['submit'].includes(queue)) {
+                                statUpdateKey = `${queue}:${status === 'completed' ? 'success' : 'fail'}`;
+                            }
+                            break;
+                        }
+                    }
+
+                    if (statUpdateKey) {
+                        // increment counter in redis
+
+                        let now = new Date();
+
+                        // we keep a separate hash value for each ISO day
+                        let dateStr = `${now
+                            .toISOString()
+                            .substr(0, 10)
+                            .replace(/[^0-9]+/g, '')}`;
+
+                        // hash key for bucket
+                        let timeStr = `${now
+                            .toISOString()
+                            // bucket includes 1 minute
+                            .substr(0, 16)
+                            .replace(/[^0-9]+/g, '')}`;
+
+                        let hkey = `${REDIS_PREFIX}stats:${statUpdateKey}:${dateStr}`;
+
+                        let update = redis
+                            .multi()
+                            .hincrby(hkey, timeStr, 1)
+                            .sadd(`${REDIS_PREFIX}stats:keys`, statUpdateKey)
+                            // keep alive at most 2 days
+                            .expire(hkey, MAX_DAYS_STATS + 1 * 24 * 3600);
+
+                        if (account && accountUpdateKey) {
+                            // increment account specific counter
+                            let accountKey = `${REDIS_PREFIX}iad:${account}`;
+                            update = update.hincrby(accountKey, `stats:count:${accountUpdateKey}`, 1);
+                        }
+
+                        update.exec().catch(() => false);
+                    } else if (account && accountUpdateKey) {
+                        let accountKey = `${REDIS_PREFIX}iad:${account}`;
+                        redis.hincrby(accountKey, `stats:count:${accountUpdateKey}`, 1).catch(() => false);
+                    }
+
+                    if (message.key && metrics[message.key] && typeof metrics[message.key][message.method] === 'function') {
+                        metrics[message.key][message.method](...message.args);
+                    }
+
+                    return;
+                }
+
+                case 'settings':
+                    availableIMAPWorkers.forEach(worker => {
+                        try {
+                            postMessage(worker, message);
+                        } catch (err) {
+                            logger.error({ msg: 'Failed to post command to child', worker: worker.threadId, callPayload: message, err });
+                        }
+                    });
+                    return;
+
+                case 'change':
+                    switch (message.type) {
+                        case 'smtpServerState':
+                        case 'imapProxyServerState': {
+                            let type = message.type.replace(/ServerState$/, '');
+                            updateServerState(type, message.key, message.payload).catch(err =>
+                                logger.error({ msg: `Failed to update ${type} server state`, err })
+                            );
+                            break;
+                        }
+                        default:
+                            // forward all state changes to the API worker
+                            for (let worker of workers.get('api') || []) {
+                                try {
+                                    postMessage(worker, message, true);
+                                } catch (err) {
+                                    logger.error({ msg: 'Failed to post state change to child', worker: worker.threadId, callPayload: message, err });
+                                }
+                            }
+                    }
+                    break;
+            }
+
+            switch (type) {
+                case 'imap':
+                    if (message.cmd === 'ready') {
+                        availableIMAPWorkers.add(worker);
+                        isOnline = true;
+                        resolve(worker.threadId);
+
+                        if (imapInitialWorkersLoaded) {
+                            assignAccounts().catch(err => logger.error({ msg: 'Failed to assign accounts', n: 2, err }));
+                        }
+                    }
+                    break;
+            }
         });
     });
-
-    worker.on('message', message => {
-        let workerMeta = workersMeta.has(worker) ? workersMeta.get(worker) : {};
-        workerMeta.messages = workerMeta.messages ? ++workerMeta.messages : 1;
-        workersMeta.set(worker, workerMeta);
-
-        if (!message) {
-            return;
-        }
-
-        if (message.cmd === 'resp' && message.mid && callQueue.has(message.mid)) {
-            let { resolve, reject, timer } = callQueue.get(message.mid);
-            clearTimeout(timer);
-            callQueue.delete(message.mid);
-            if (message.error) {
-                let err = new Error(message.error);
-                if (message.code) {
-                    err.code = message.code;
-                }
-                if (message.statusCode) {
-                    err.statusCode = message.statusCode;
-                }
-                if (message.info) {
-                    err.info = message.info;
-                }
-                return reject(err);
-            } else {
-                return resolve(message.response);
-            }
-        }
-
-        if (message.cmd === 'call' && message.mid) {
-            return onCommand(worker, message.message)
-                .then(response => {
-                    let transferList;
-                    if (response && typeof response === 'object' && response._transfer === true) {
-                        if (typeof response._response === 'object' && response._response && response._response.buffer) {
-                            transferList = [response._response.buffer];
-                        }
-                        response = response._response;
-                    }
-
-                    let callPayload = {
-                        cmd: 'resp',
-                        mid: message.mid,
-                        response
-                    };
-
-                    try {
-                        postMessage(worker, callPayload, null, transferList);
-                    } catch (err) {
-                        if (Buffer.isBuffer(callPayload.response)) {
-                            callPayload.response = `Buffer <${callPayload.response.length}B>`;
-                        }
-
-                        logger.error({ msg: 'Failed to post state change to child', worker: worker.threadId, callPayload, err });
-                    }
-                })
-                .catch(err => {
-                    let callPayload = {
-                        cmd: 'resp',
-                        mid: message.mid,
-                        error: err.message,
-                        code: err.code,
-                        statusCode: err.statusCode,
-                        info: err.info
-                    };
-
-                    try {
-                        postMessage(worker, callPayload);
-                    } catch (err) {
-                        logger.error({ msg: 'Failed to post state change to child', worker: worker.threadId, callPayload, err });
-                    }
-                });
-        }
-
-        switch (message.cmd) {
-            case 'metrics': {
-                let statUpdateKey = false;
-
-                switch (message.key) {
-                    // gather for dashboard counter
-                    case 'webhooks': {
-                        let { status } = message.args[0] || {};
-                        statUpdateKey = `${message.key}:${status}`;
-                        break;
-                    }
-
-                    case 'webhookReq': {
-                        break;
-                    }
-
-                    case 'events': {
-                        let { event } = message.args[0] || {};
-                        switch (event) {
-                            case MESSAGE_NEW_NOTIFY:
-                            case MESSAGE_DELETED_NOTIFY:
-                            case CONNECT_ERROR_NOTIFY:
-                                statUpdateKey = `${message.key}:${event}`;
-                                break;
-                        }
-                        break;
-                    }
-
-                    case 'apiCall': {
-                        let { statusCode } = message.args[0] || {};
-                        let success = statusCode >= 200 && statusCode < 300;
-                        statUpdateKey = `${message.key}:${success ? 'success' : 'fail'}`;
-                        break;
-                    }
-
-                    case 'queuesProcessed': {
-                        let { queue, status } = message.args[0] || {};
-                        if (['submit'].includes(queue)) {
-                            statUpdateKey = `${queue}:${status === 'completed' ? 'success' : 'fail'}`;
-                        }
-                        break;
-                    }
-                }
-
-                if (statUpdateKey) {
-                    // increment counter in redis
-
-                    let now = new Date();
-
-                    // we keep a separate hash value for each ISO day
-                    let dateStr = `${now
-                        .toISOString()
-                        .substr(0, 10)
-                        .replace(/[^0-9]+/g, '')}`;
-
-                    // hash key for bucket
-                    let timeStr = `${now
-                        .toISOString()
-                        // bucket includes 1 minute
-                        .substr(0, 16)
-                        .replace(/[^0-9]+/g, '')}`;
-
-                    let hkey = `${REDIS_PREFIX}stats:${statUpdateKey}:${dateStr}`;
-
-                    redis
-                        .multi()
-                        .hincrby(hkey, timeStr, 1)
-                        .sadd(`${REDIS_PREFIX}stats:keys`, statUpdateKey)
-                        // keep alive at most 2 days
-                        .expire(hkey, MAX_DAYS_STATS + 1 * 24 * 3600)
-                        .exec()
-                        .catch(() => false);
-                }
-
-                if (message.key && metrics[message.key] && typeof metrics[message.key][message.method] === 'function') {
-                    metrics[message.key][message.method](...message.args);
-                }
-
-                return;
-            }
-
-            case 'settings':
-                availableIMAPWorkers.forEach(worker => {
-                    try {
-                        postMessage(worker, message);
-                    } catch (err) {
-                        logger.error({ msg: 'Failed to post command to child', worker: worker.threadId, callPayload: message, err });
-                    }
-                });
-                return;
-
-            case 'change':
-                switch (message.type) {
-                    case 'smtpServerState':
-                    case 'imapProxyServerState': {
-                        let type = message.type.replace(/ServerState$/, '');
-                        updateServerState(type, message.key, message.payload).catch(err => logger.error({ msg: `Failed to update ${type} server state`, err }));
-                        break;
-                    }
-                    default:
-                        // forward all state changes to the API worker
-                        for (let worker of workers.get('api')) {
-                            try {
-                                postMessage(worker, message, true);
-                            } catch (err) {
-                                logger.error({ msg: 'Failed to post state change to child', worker: worker.threadId, callPayload: message, err });
-                            }
-                        }
-                }
-                break;
-        }
-
-        switch (type) {
-            case 'imap':
-                return processImapWorkerMessage(worker, message);
-        }
-    });
 };
-
-function processImapWorkerMessage(worker, message) {
-    if (!message || !message.cmd) {
-        logger.debug({ msg: 'Unexpected message', type: 'imap', message });
-
-        return;
-    }
-
-    switch (message.cmd) {
-        case 'ready':
-            availableIMAPWorkers.add(worker);
-            // assign pending accounts
-            assignAccounts().catch(err => logger.error({ msg: 'Failed to assign accounts', n: 2, err }));
-            break;
-    }
-}
 
 async function call(worker, message, transferList) {
     return new Promise((resolve, reject) => {
         let mid = `${Date.now()}:${++mids}`;
 
         let ttl = Math.max(message.timeout || 0, EENGINE_TIMEOUT || 0);
+
         let timer = setTimeout(() => {
             let err = new Error('Timeout waiting for command response [T1]');
             err.statusCode = 504;
@@ -1044,7 +1092,8 @@ let licenseCheckHandler = async opts => {
                     body: JSON.stringify({
                         key: licenseInfo.details.key,
                         version: packageData.version,
-                        app: '@postalsys/emailengine-app'
+                        app: '@postalsys/emailengine-app',
+                        instance: (await settings.get('serviceId')) || ''
                     }),
                     dispatcher: fetchAgent
                 });
@@ -1168,6 +1217,83 @@ function checkUpgrade() {
     });
 }
 
+// measure Redis ping once in every 10 seconds
+
+let redisPingCounter = [];
+
+function getRedisPing() {
+    if (!redisPingCounter.length) {
+        return null;
+    }
+
+    let entries = []
+        .concat(redisPingCounter)
+        .slice(-34)
+        .sort((a, b) => a - b);
+
+    // remove 2 highest and lowest if possible
+    for (let i = 0; i < 2; i++) {
+        if (entries.length > 4) {
+            entries.shift();
+            entries.pop();
+        }
+    }
+
+    let sum = 0;
+    for (let entry of entries) {
+        sum += entry;
+    }
+
+    return Math.round(sum / entries.length);
+}
+
+const REDIS_PING_TIMEOUT = 10 * 1000;
+let redisPingTimer = false;
+
+const getCurrentRedisPing = async () => {
+    try {
+        // this request is not timed, it is to ensure that there is an open connection
+        await redis.ping();
+
+        let startTime = process.hrtime.bigint();
+        await redis.ping();
+        let endTime = process.hrtime.bigint();
+
+        let duration = Number(endTime - startTime);
+
+        return duration;
+    } catch (err) {
+        logger.error({ msg: 'Failed to run Redis ping', err });
+    }
+    return 0;
+};
+
+const processRedisPing = async () => {
+    try {
+        let duration = await getCurrentRedisPing();
+        redisPingCounter.push(duration);
+        if (redisPingCounter.length > 300) {
+            redisPingCounter = redisPingCounter.slice(0, 150);
+        }
+        return duration;
+    } catch (err) {
+        logger.error({ msg: 'Failed to run Redis ping', err });
+    }
+};
+
+const redisPingHandler = async () => {
+    await processRedisPing();
+    redisPingTimer = setTimeout(checkRedisPing, REDIS_PING_TIMEOUT);
+    redisPingTimer.unref();
+};
+
+function checkRedisPing() {
+    clearTimeout(redisPingTimer);
+    redisPingHandler().catch(err => {
+        logger.error('Failed to process Redis Ping', err);
+    });
+}
+
 async function updateQueueCounters() {
     metrics.emailengineConfig.set({ version: 'v' + packageData.version }, 1);
     metrics.emailengineConfig.set({ config: 'uvThreadpoolSize' }, Number(process.env.UV_THREADPOOL_SIZE));
@@ -1198,9 +1324,14 @@ async function updateQueueCounters() {
     try {
         let redisInfo = await getRedisStats(redis);
 
-        metrics.redisVersion.set({ version: 'v' + redisInfo.redis_version }, 1);
+        if (redisInfo.redis_version) {
+            metrics.redisVersion.set({ version: 'v' + redisInfo.redis_version }, 1);
+        }
 
         metrics.redisUptimeInSeconds.set(Number(redisInfo.uptime_in_seconds) || 0);
+
+        metrics.redisPing.set((await getCurrentRedisPing()) || 0);
+
         metrics.redisRejectedConnectionsTotal.set(Number(redisInfo.rejected_connections) || 0);
         metrics.redisConfigMaxclients.set(Number(redisInfo.maxclients) || 0);
         metrics.redisConnectedClients.set(Number(redisInfo.connected_clients) || 0);
@@ -1262,7 +1393,7 @@ async function onCommand(worker, message) {
                 }
             }
 
-            return { connections };
+            return { connections, redisPing: await getRedisPing() };
         }
 
         case 'imapWorkerCount': {
@@ -1373,11 +1504,241 @@ async function onCommand(worker, message) {
 
         // run these in main process to avoid polluting RAM with the memory hungry tokenization library
         case 'generateSummary': {
-            return await generateSummary(...message.args);
+            let requestOpts = {
+                verbose: getBoolean(process.env.EE_OPENAPI_VERBOSE)
+            };
+
+            let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
+
+            if (!openAiAPIKey) {
+                throw new Error(`OpenAI API key is not set`);
+            }
+
+            let openAiModel = message.data.openAiModel || (await settings.get('openAiModel'));
+            if (openAiModel) {
+                requestOpts.gptModel = openAiModel;
+            }
+
+            let openAiAPIUrl = message.data.openAiAPIUrl || (await settings.get('openAiAPIUrl'));
+            if (openAiAPIUrl) {
+                requestOpts.baseApiUrl = openAiAPIUrl;
+            }
+
+            let openAiTemperature = message.data.openAiTemperature || (await settings.get('openAiTemperature'));
+            if (openAiTemperature) {
+                requestOpts.temperature = openAiTemperature;
+            }
+
+            let openAiTopP = message.data.openAiTopP || (await settings.get('openAiTopP'));
+            if (openAiTopP) {
+                requestOpts.topP = openAiTopP;
+            }
+
+            switch (openAiModel) {
+                case 'gpt-4':
+                    requestOpts.maxTokens = 6500;
+                    break;
+                case 'gpt-3.5-turbo':
+                case 'gpt-3.5-turbo-instruct':
+                default:
+                    requestOpts.maxTokens = 3000;
+                    break;
+            }
+
+            requestOpts.user = message.data.account;
+
+            let userPrompt = message.data.openAiPrompt || ((await settings.get('openAiPrompt')) || '').toString();
+            if (userPrompt.trim()) {
+                requestOpts.userPrompt = userPrompt;
+            }
+
+            return await generateSummary(message.data.message, openAiAPIKey, requestOpts);
         }
 
-        case 'riskAnalysis': {
-            return await riskAnalysis(...message.args);
+        // run these in main process to avoid polluting RAM with the memory hungry tokenization library
+        case 'generateEmbeddings': {
+            let requestOpts = {
+                verbose: getBoolean(process.env.EE_OPENAPI_VERBOSE)
+            };
+
+            let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
+
+            if (!openAiAPIKey) {
+                throw new Error(`OpenAI API key is not set`);
+            }
+
+            let openAiAPIUrl = message.data.openAiAPIUrl || (await settings.get('openAiAPIUrl'));
+            if (openAiAPIUrl) {
+                requestOpts.baseApiUrl = openAiAPIUrl;
+            }
+
+            requestOpts.user = message.data.account;
+
+            const embeddings = await generateEmbeddings(message.data.message, openAiAPIKey, requestOpts);
+            if (!Array.isArray(embeddings?.embeddings)) {
+                return false;
+            }
+
+            for (let value of embeddings.embeddings) {
+                for (const key of Object.keys(value)) {
+                    if (/^_/.test(key)) {
+                        delete value[key];
+                    }
+                }
+            }
+
+            return embeddings;
+        }
+
+        case 'embeddingsQuery': {
+            let requestOpts = {
+                verbose: getBoolean(process.env.EE_OPENAPI_VERBOSE)
+            };
+
+            let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
+
+            if (!openAiAPIKey) {
+                throw new Error(`OpenAI API key is not set`);
+            }
+
+            let openAiAPIUrl = message.data.openAiAPIUrl || (await settings.get('openAiAPIUrl'));
+            if (openAiAPIUrl) {
+                requestOpts.baseApiUrl = openAiAPIUrl;
+            }
+
+            let openAiModel = message.data.openAiModel || (await settings.get('documentStoreChatModel')) || (await settings.get('openAiModel'));
+            if (openAiModel) {
+                requestOpts.gptModel = openAiModel;
+            }
+
+            switch (openAiModel) {
+                case 'gpt-4':
+                    requestOpts.maxTokens = 6500;
+                    break;
+                case 'gpt-3.5-turbo':
+                case 'gpt-3.5-turbo-instruct':
+                default:
+                    requestOpts.maxTokens = 3000;
+                    break;
+            }
+
+            requestOpts.user = message.data.account;
+            requestOpts.temperature = 0.4;
+
+            requestOpts.question = message.data.question;
+            requestOpts.contextChunks = message.data.contextChunks;
+            requestOpts.userData = message.data.userData;
+
+            let response = await embeddingsQuery(openAiAPIKey, requestOpts);
+
+            if (response?.['Message-ID']) {
+                response.messageId = response?.['Message-ID'];
+                delete response?.['Message-ID'];
+            }
+            if (response?.messageId) {
+                response.messageId = [].concat(response?.messageId || []).map(value => (value || '').toString().trim().replace(/^<?/, '<').replace(/>?$/, '>'));
+            }
+
+            if (response?.answer) {
+                if (typeof response.answer === 'object') {
+                    response.answer = JSON.stringify(response.answer);
+                } else {
+                    response.answer = response.answer.toString();
+                }
+            }
+
+            for (const key of Object.keys(response)) {
+                if (/^_/.test(key)) {
+                    delete response[key];
+                }
+            }
+
+            return response;
+        }
+
+        case 'questionQuery': {
+            let requestOpts = {
+                verbose: getBoolean(process.env.EE_OPENAPI_VERBOSE)
+            };
+
+            let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
+
+            if (!openAiAPIKey) {
+                throw new Error(`OpenAI API key is not set`);
+            }
+
+            let openAiAPIUrl = message.data.openAiAPIUrl || (await settings.get('openAiAPIUrl'));
+            if (openAiAPIUrl) {
+                requestOpts.baseApiUrl = openAiAPIUrl;
+            }
+
+            let openAiModel = message.data.openAiModel || 'gpt-3.5-turbo-instruct';
+            if (openAiModel) {
+                requestOpts.gptModel = openAiModel;
+            }
+
+            requestOpts.user = message.data.account;
+
+            let response = await questionQuery(message.data.question, openAiAPIKey, requestOpts);
+
+            for (const key of Object.keys(response)) {
+                if (/^_/.test(key)) {
+                    delete response[key];
+                }
+            }
+
+            return response;
+        }
+
+        // run these in main process to avoid polluting RAM with the memory hungry tokenization library
+        case 'generateChunkEmbeddings': {
+            let requestOpts = {
+                verbose: getBoolean(process.env.EE_OPENAPI_VERBOSE)
+            };
+
+            let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
+
+            if (!openAiAPIKey) {
+                throw new Error(`OpenAI API key is not set`);
+            }
+
+            let openAiAPIUrl = message.data.openAiAPIUrl || (await settings.get('openAiAPIUrl'));
+            if (openAiAPIUrl) {
+                requestOpts.baseApiUrl = openAiAPIUrl;
+            }
+
+            requestOpts.user = message.data.account;
+
+            const data = await getChunkEmbeddings(message.data.message, openAiAPIKey, requestOpts);
+
+            return data;
+        }
+
+        case 'openAiListModels': {
+            let requestOpts = {
+                verbose: getBoolean(process.env.EE_OPENAPI_VERBOSE)
+            };
+
+            let openAiAPIKey = message.data.openAiAPIKey || (await settings.get('openAiAPIKey'));
+
+            if (!openAiAPIKey) {
+                throw new Error(`OpenAI API key is not set`);
+            }
+
+            let openAiAPIUrl = message.data.openAiAPIUrl || (await settings.get('openAiAPIUrl'));
+            if (openAiAPIUrl) {
+                requestOpts.baseApiUrl = openAiAPIUrl;
+            }
+
+            requestOpts.user = message.data.account;
+
+            const data = await openAiListModels(openAiAPIKey, requestOpts);
+
+            return data;
+        }
+
+        case 'openAiDefaultPrompt': {
+            return openAiDefaultPrompt;
         }
 
         case 'threads': {
@@ -1512,6 +1873,7 @@ async function onCommand(worker, message) {
         case 'moveMessages':
         case 'deleteMessage':
         case 'deleteMessages':
+        case 'getQuota':
         case 'createMailbox':
         case 'renameMailbox':
         case 'deleteMailbox':
@@ -1630,7 +1992,7 @@ process.on('SIGTERM', () => {
     }
     isClosing = true;
     closeQueues(() => {
-        process.exit();
+        logger.flush(() => process.exit());
     });
 });
 
@@ -1641,7 +2003,7 @@ process.on('SIGINT', () => {
     }
     isClosing = true;
     closeQueues(() => {
-        process.exit();
+        logger.flush(() => process.exit());
     });
 });
 
@@ -1665,7 +2027,7 @@ const startApplication = async () => {
             await setLicense(licenseData, licenseFile);
         } catch (err) {
             logger.fatal({ msg: 'Failed to verify provided license key file', source: config.licensePath, err });
-            return process.exit(13);
+            return logger.flush(() => process.exit(13));
         }
     }
 
@@ -1678,7 +2040,7 @@ const startApplication = async () => {
             }
         } catch (err) {
             logger.fatal({ msg: 'Failed to verify provided license key data', source: 'import', err });
-            return process.exit(13);
+            return logger.flush(() => process.exit(13));
         }
     }
 
@@ -1729,6 +2091,11 @@ const startApplication = async () => {
     }
 
     // prepare some required configuration values
+    let existingServiceId = await settings.get('serviceId');
+    if (existingServiceId === null) {
+        await settings.set('serviceId', crypto.randomBytes(16).toString('hex'));
+    }
+
     let existingSmtpEnabled = await settings.get('smtpServerEnabled');
     if (existingSmtpEnabled === null) {
         await settings.set('smtpServerEnabled', !!SMTP_ENABLED);
@@ -1786,7 +2153,7 @@ const startApplication = async () => {
 
     let existingEnableApiProxy = await settings.get('enableApiProxy');
     if (existingEnableApiProxy === null) {
-        await settings.set('enableApiProxy', API_PROXY);
+        await settings.set('enableApiProxy', HAS_API_PROXY_SET ? API_PROXY : true);
     }
 
     let existingServiceSecret = await settings.get('serviceSecret');
@@ -1798,6 +2165,21 @@ const startApplication = async () => {
     if (existingQueueKeep === null) {
         let QUEUE_KEEP = Math.max((readEnvValue('EENGINE_QUEUE_REMOVE_AFTER') && Number(readEnvValue('EENGINE_QUEUE_REMOVE_AFTER'))) || 0, 0);
         await settings.set('queueKeep', QUEUE_KEEP);
+    }
+
+    let existingNotifyText = await settings.get('notifyText');
+    if (existingNotifyText === null) {
+        await settings.set('notifyText', true);
+    }
+
+    let existingNotifyTextSize = await settings.get('notifyTextSize');
+    if (existingNotifyTextSize === null) {
+        await settings.set('notifyTextSize', 2 * 1024 * 1024); // set default max text size in webhooks to 2MB
+    }
+
+    let existingScriptEnv = await settings.get('scriptEnv');
+    if (existingScriptEnv === null) {
+        await settings.set('scriptEnv', {}); // empty object
     }
 
     if (preparedToken) {
@@ -1840,9 +2222,19 @@ const startApplication = async () => {
     }
 
     // multiple IMAP connection handlers
+    let workerPromises = [];
     for (let i = 0; i < config.workers.imap; i++) {
-        await spawnWorker('imap');
+        workerPromises.push(spawnWorker('imap'));
     }
+    let threadIds = await Promise.all(workerPromises);
+    logger.info({ msg: 'IMAP workers started', workers: config.workers.imap, threadIds });
+
+    try {
+        await assignAccounts();
+    } catch (err) {
+        logger.error({ msg: 'Failed to assign accounts', n: 2, err });
+    }
+    imapInitialWorkersLoaded = true;
 
     for (let i = 0; i < config.workers.webhooks; i++) {
         await spawnWorker('webhooks');
@@ -1865,7 +2257,7 @@ const startApplication = async () => {
         await spawnWorker('imapProxy');
     }
 
-    // single worker for HTTP
+    // single worker for HTTP, start last to avoid running API requests for still-missing targets
     await spawnWorker('api');
 };
 
@@ -1882,11 +2274,14 @@ startApplication()
         upgradeCheckTimer = setTimeout(checkUpgrade, UPGRADE_CHECK_TIMEOUT);
         upgradeCheckTimer.unref();
 
+        redisPingTimer = setTimeout(checkRedisPing, REDIS_PING_TIMEOUT);
+        redisPingTimer.unref();
+
         queueEvents.notify = new QueueEvents('notify', Object.assign({}, queueConf));
         queueEvents.submit = new QueueEvents('submit', Object.assign({}, queueConf));
         queueEvents.documents = new QueueEvents('documents', Object.assign({}, queueConf));
     })
     .catch(err => {
-        logger.error({ msg: 'Failed to start application', err });
-        process.exit(1);
+        logger.fatal({ msg: 'Failed to start application', err });
+        logger.flush(() => process.exit(1));
     });

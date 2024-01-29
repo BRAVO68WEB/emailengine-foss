@@ -9,7 +9,14 @@ const Path = require('path');
 const { loadTranslations, gt, joiLocales } = require('../lib/translations');
 const util = require('util');
 const { webhooks: Webhooks } = require('../lib/webhooks');
+const featureFlags = require('../lib/feature-flags');
 const Bell = require('@hapi/bell');
+const marked = require('marked');
+
+const fs = require('fs');
+const eulaText = marked.parse(
+    fs.readFileSync(Path.join(__dirname, '..', 'LICENSE_EMAILENGINE.txt'), 'utf-8').replace(/\blicenses\.html\b/g, '[licenses.html](/licenses.html)')
+);
 
 const {
     getByteSize,
@@ -26,7 +33,11 @@ const {
     readEnvValue,
     matchIp,
     getSignedFormData,
-    threadStats
+    threadStats,
+    detectAutomatedRequest,
+    hasEnvValue,
+    getBoolean,
+    loadTlsConfig
 } = require('../lib/tools');
 
 const Bugsnag = require('@bugsnag/js');
@@ -76,7 +87,7 @@ const { autodetectImapSettings } = require('../lib/autodetect-imap-settings');
 const Hecks = require('@postalsys/hecks');
 const { arenaExpress } = require('../lib/arena-express');
 const outbox = require('../lib/outbox');
-const { templates } = require('../lib/templates');
+
 const { lists } = require('../lib/lists');
 
 const { redis, REDIS_CONF, documentsQueue, notifyQueue, submitQueue } = require('../lib/db');
@@ -104,11 +115,19 @@ const {
     TLS_RENEW_CHECK_INTERVAL,
     DEFAULT_CORS_MAX_AGE,
     LIST_UNSUBSCRIBE_NOTIFY,
-    FETCH_TIMEOUT
+    FETCH_TIMEOUT,
+    DEFAULT_MAX_BODY_SIZE,
+    DEFAULT_EENGINE_TIMEOUT,
+    DEFAULT_MAX_ATTACHMENT_SIZE,
+    MAX_FORM_TTL,
+    NONCE_BYTES
 } = consts;
 
 const { fetch: fetchCmd, Agent } = require('undici');
 const fetchAgent = new Agent({ connect: { timeout: FETCH_TIMEOUT } });
+
+const templateRoutes = require('../lib/api-routes/template-routes');
+const chatRoutes = require('../lib/api-routes/chat-routes');
 
 const {
     settingsSchema,
@@ -133,27 +152,26 @@ const {
     accountSchemas,
     oauthCreateSchema,
     tokenRestrictionsSchema,
-    accountIdSchema
+    accountIdSchema,
+    ipSchema,
+    accountCountersSchema
 } = require('../lib/schemas');
 
 const FLAG_SORT_ORDER = ['\\Inbox', '\\Flagged', '\\Sent', '\\Drafts', '\\All', '\\Archive', '\\Junk', '\\Trash'];
-
-const DEFAULT_EENGINE_TIMEOUT = 10 * 1000;
-const DEFAULT_MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024;
-const DEFAULT_MAX_BODY_SIZE = 50 * 1024 * 1024;
 
 const { OUTLOOK_SCOPES } = require('../lib/oauth/outlook');
 const { GMAIL_SCOPES } = require('../lib/oauth/gmail');
 const { MAIL_RU_SCOPES } = require('../lib/oauth/mail-ru');
 
-const REDACTED_KEYS = ['req.headers.authorization', 'req.headers.cookie'];
+const REDACTED_KEYS = ['req.headers.authorization', 'req.headers.cookie', 'err.rawPacket'];
 
 const SMTP_TEST_HOST = 'https://api.nodemailer.com';
 
 config.api = config.api || {
     port: 3000,
     host: '127.0.0.1',
-    proxy: false
+    proxy: false,
+    tls: false
 };
 
 config.service = config.service || {};
@@ -169,8 +187,14 @@ const EENGINE_TIMEOUT = getDuration(readEnvValue('EENGINE_TIMEOUT') || config.se
 const MAX_ATTACHMENT_SIZE = getByteSize(readEnvValue('EENGINE_MAX_SIZE') || config.api.maxSize) || DEFAULT_MAX_ATTACHMENT_SIZE;
 
 const API_PORT =
-    (readEnvValue('EENGINE_PORT') && Number(readEnvValue('EENGINE_PORT'))) || (readEnvValue('PORT') && Number(readEnvValue('PORT'))) || config.api.port;
+    (hasEnvValue('EENGINE_PORT') && Number(readEnvValue('EENGINE_PORT'))) || (hasEnvValue('PORT') && Number(readEnvValue('PORT'))) || config.api.port;
 const API_HOST = readEnvValue('EENGINE_HOST') || config.api.host;
+
+// Either an object (TLS enabled) or `false` (TLS disabled)
+const API_TLS = hasEnvValue('EENGINE_API_TLS') ? getBoolean(readEnvValue('EENGINE_API_TLS')) && (config.api.tls || {}) : config.api.tls || false;
+
+// Merge TLS settings from config params and environment
+loadTlsConfig(API_TLS, 'EENGINE_API_TLS_');
 
 const IMAP_WORKER_COUNT = getWorkerCount(readEnvValue('EENGINE_WORKERS') || (config.workers && config.workers.imap)) || 4;
 
@@ -196,9 +220,8 @@ const CORS_CONFIG = !CORS_ORIGINS
                   )
               ) || ['*']
           ),
-          headers: ['Authorization'],
-          exposedHeaders: ['Accept'],
-          additionalExposedHeaders: [],
+          additionalHeaders: ['X-EE-Timeout'],
+          additionalExposedHeaders: ['Accept'],
           preflightStatusCode: 204,
           maxAge:
               getDuration(readEnvValue('EENGINE_CORS_MAX_AGE') || (config.cors && config.cors.maxAge), {
@@ -270,6 +293,7 @@ async function call(message, transferList) {
         let mid = `${Date.now()}:${++mids}`;
 
         let ttl = Math.max(message.timeout || 0, EENGINE_TIMEOUT || 0);
+
         let timer = setTimeout(() => {
             let err = new Error('Timeout waiting for command response [T2]');
             err.statusCode = 504;
@@ -431,7 +455,14 @@ const init = async () => {
 
     handlebars.registerHelper('ngettext', (msgid, plural, count) => util.format(gt.ngettext(msgid, plural, count), count));
 
-    handlebars.registerHelper('equals', (compareVal, baseVal, options) => {
+    handlebars.registerHelper('featureFlag', function (flag, options) {
+        if (featureFlags.enabled(flag)) {
+            return options.fn(this); // eslint-disable-line no-invalid-this
+        }
+        return options.inverse(this); // eslint-disable-line no-invalid-this
+    });
+
+    handlebars.registerHelper('equals', function (compareVal, baseVal, options) {
         if (baseVal === compareVal) {
             return options.fn(this); // eslint-disable-line no-invalid-this
         }
@@ -443,12 +474,31 @@ const init = async () => {
     const server = Hapi.server({
         port: API_PORT,
         host: API_HOST,
+        tls: API_TLS,
+
+        state: {
+            strictHeader: false
+        },
 
         router: {
             stripTrailingSlash: true
         },
         routes: {
-            validate: { options: { messages: joiLocales } }
+            validate: {
+                options: {
+                    messages: joiLocales,
+                    convert: true
+                },
+                headers: Joi.object({
+                    'x-ee-timeout': Joi.number()
+                        .integer()
+                        .min(0)
+                        .max(2 * 3600 * 1000)
+                        .optional()
+                        .description(`Override the \`EENGINE_TIMEOUT\` environment variable for a single API request (in milliseconds)`)
+                        .label('X-EE-Timeout')
+                }).unknown()
+            }
         }
     });
 
@@ -579,7 +629,7 @@ const init = async () => {
         }
 
         // make license info available for the request
-        request.app.licenseInfo = await call({ cmd: 'license' });
+        request.app.licenseInfo = await call({ cmd: 'license', timeout: request.headers['x-ee-timeout'] });
 
         // flash notifications
         request.flash = async message => await flash(redis, request, message);
@@ -982,6 +1032,36 @@ When making API calls remember that requests against the same account are queued
 
     server.route({
         method: 'GET',
+        path: '/sbom.json',
+        handler: {
+            file: { path: pathlib.join(__dirname, '..', 'sbom.json'), confine: false }
+        },
+        options: {
+            auth: false
+        }
+    });
+
+    server.route({
+        method: 'GET',
+        path: '/license.html',
+        async handler(request, h) {
+            return h.view(
+                'license',
+                {
+                    eulaText
+                },
+                {
+                    layout: 'main'
+                }
+            );
+        },
+        options: {
+            auth: false
+        }
+    });
+
+    server.route({
+        method: 'GET',
         path: '/robots.txt',
         handler: {
             file: { path: pathlib.join(__dirname, '..', 'static', 'robots.txt'), confine: false }
@@ -1007,8 +1087,8 @@ When making API calls remember that requests against the same account are queued
     server.route({
         method: 'GET',
         path: '/health',
-        async handler() {
-            const imapWorkerCount = await call({ cmd: 'imapWorkerCount' });
+        async handler(request) {
+            const imapWorkerCount = await call({ cmd: 'imapWorkerCount', timeout: request.headers['x-ee-timeout'] });
             if (imapWorkerCount < IMAP_WORKER_COUNT) {
                 let error = Boom.boomify(new Error('Not all IMAP workers available'), { statusCode: 500 });
                 throw error;
@@ -1055,12 +1135,24 @@ When making API calls remember that requests against the same account are queued
                 throw error;
             }
 
-            await sendWebhook(data.acc, TRACK_CLICK_NOTIFY, {
-                messageId: data.msg,
-                url: data.url,
-                remoteAddress: request.info.remoteAddress,
-                userAgent: request.headers['user-agent']
-            });
+            if (!(await detectAutomatedRequest(request.app.ip))) {
+                await sendWebhook(data.acc, TRACK_CLICK_NOTIFY, {
+                    messageId: data.msg,
+                    url: data.url,
+                    remoteAddress: request.app.ip,
+                    userAgent: request.headers['user-agent']
+                });
+            } else {
+                request.logger.info({
+                    msg: 'Detected automated request',
+                    account: data.acc,
+                    event: TRACK_CLICK_NOTIFY,
+                    messageId: data.msg,
+                    url: data.url,
+                    remoteAddress: request.app.ip,
+                    userAgent: request.headers['user-agent']
+                });
+            }
 
             return h.redirect(data.url);
         },
@@ -1107,11 +1199,22 @@ When making API calls remember that requests against the same account are queued
                 throw error;
             }
 
-            await sendWebhook(data.acc, TRACK_OPEN_NOTIFY, {
-                messageId: data.msg,
-                remoteAddress: request.info.remoteAddress,
-                userAgent: request.headers['user-agent']
-            });
+            if (!(await detectAutomatedRequest(request.app.ip))) {
+                await sendWebhook(data.acc, TRACK_OPEN_NOTIFY, {
+                    messageId: data.msg,
+                    remoteAddress: request.app.ip,
+                    userAgent: request.headers['user-agent']
+                });
+            } else {
+                request.logger.info({
+                    msg: 'Detected automated request',
+                    account: data.acc,
+                    event: TRACK_OPEN_NOTIFY,
+                    messageId: data.msg,
+                    remoteAddress: request.app.ip,
+                    userAgent: request.headers['user-agent']
+                });
+            }
 
             // respond with a static image file
             return h
@@ -1166,7 +1269,13 @@ When making API calls remember that requests against the same account are queued
                 return 'not ok';
             }
 
-            let accountObject = new Account({ redis, account: data.acc, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: data.acc,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 // throws if account does not exist
@@ -1186,7 +1295,7 @@ When making API calls remember that requests against the same account are queued
                     source: 'one-click',
                     reason: 'unsubscribe',
                     messageId: data.msg,
-                    remoteAddress: request.info.remoteAddress,
+                    remoteAddress: request.app.ip,
                     userAgent: request.headers['user-agent'],
                     created: new Date().toISOString()
                 })
@@ -1197,7 +1306,7 @@ When making API calls remember that requests against the same account are queued
                     recipient: data.rcpt,
                     messageId: data.msg,
                     listId: data.list,
-                    remoteAddress: request.info.remoteAddress,
+                    remoteAddress: request.app.ip,
                     userAgent: request.headers['user-agent']
                 });
             }
@@ -1322,6 +1431,8 @@ When making API calls remember that requests against the same account are queued
 
                     accountData.email = isEmail(profileRes.emailAddress) ? profileRes.emailAddress : accountData.email;
 
+                    const defaultScopes = (oauth2App.baseScopes && GMAIL_SCOPES[oauth2App.baseScopes]) || GMAIL_SCOPES.imap;
+
                     accountData.oauth2 = Object.assign(
                         accountData.oauth2 || {},
                         {
@@ -1329,7 +1440,7 @@ When making API calls remember that requests against the same account are queued
                             accessToken: r.access_token,
                             refreshToken: r.refresh_token,
                             expires: new Date(Date.now() + r.expires_in * 1000),
-                            scope: r.scope ? r.scope.split(/\s+/) : GMAIL_SCOPES,
+                            scope: r.scope ? r.scope.split(/\s+/) : defaultScopes,
                             tokenType: r.token_type
                         },
                         {
@@ -1482,8 +1593,27 @@ When making API calls remember that requests against the same account are queued
                 delete accountData.delegated;
             }
 
-            let accountObject = new Account({ redis, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
             let result = await accountObject.create(accountData);
+
+            if (accountMeta.n) {
+                // store nonce to prevent this URL to be reused
+                const keyName = `${REDIS_PREFIX}account:form:${accountMeta.n}`;
+                try {
+                    await redis
+                        .multi()
+                        .set(keyName, (accountMeta.t || '0').toString())
+                        .expire(keyName, Math.floor(MAX_FORM_TTL / 1000))
+                        .exec();
+                } catch (err) {
+                    request.logger.error({ msg: 'Failed to set nonce for an account form request', err });
+                }
+            }
 
             let httpRedirectUrl;
             if (redirectUrl) {
@@ -1554,7 +1684,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/token',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.payload.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.payload.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 // throws if account does not exist
@@ -1622,15 +1758,7 @@ When making API calls remember that requests against the same account are queued
 
                     restrictions: tokenRestrictionsSchema,
 
-                    ip: Joi.string()
-                        .empty('')
-                        .trim()
-                        .ip({
-                            version: ['ipv4', 'ipv6'],
-                            cidr: 'forbidden'
-                        })
-                        .example('127.0.0.1')
-                        .description('IP address of the requestor')
+                    ip: ipSchema.description('IP address of the requestor').label('TokenIP')
                 }).label('CreateToken')
             },
 
@@ -1762,19 +1890,11 @@ When making API calls remember that requests against the same account are queued
                                     .example('{"example": "value"}')
                                     .description('Related metadata in JSON format')
                                     .label('JsonMetaData'),
-                                ip: Joi.string()
-                                    .empty('')
-                                    .trim()
-                                    .ip({
-                                        version: ['ipv4', 'ipv6'],
-                                        cidr: 'forbidden'
-                                    })
-                                    .example('127.0.0.1')
-                                    .description('IP address of the requestor')
-                            }).label('AccountResponseItem')
+                                ip: ipSchema.description('IP address of the requestor').label('TokenIP')
+                            }).label('RootTokensItem')
                         )
-                        .label('AccountEntries')
-                }).label('AccountsFilterResponse'),
+                        .label('RootTokensEntries')
+                }).label('RootTokensResponse'),
                 failAction: 'log'
             }
         }
@@ -1851,19 +1971,11 @@ When making API calls remember that requests against the same account are queued
 
                                 restrictions: tokenRestrictionsSchema,
 
-                                ip: Joi.string()
-                                    .empty('')
-                                    .trim()
-                                    .ip({
-                                        version: ['ipv4', 'ipv6'],
-                                        cidr: 'forbidden'
-                                    })
-                                    .example('127.0.0.1')
-                                    .description('IP address of the requestor')
-                            }).label('AccountResponseItem')
+                                ip: ipSchema.description('IP address of the requestor').label('TokenIP')
+                            }).label('AccountTokensItem')
                         )
-                        .label('AccountEntries')
-                }).label('AccountsFilterResponse'),
+                        .label('AccountTokensEntries')
+                }).label('AccountsTokensResponse'),
                 failAction: 'log'
             }
         }
@@ -1874,14 +1986,19 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account',
 
         async handler(request) {
-            let accountObject = new Account({ redis, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 if (request.payload.oauth2 && request.payload.oauth2.authorize) {
                     // redirect to OAuth2 consent screen
 
                     const oAuth2Client = await oauth2Apps.getClient(request.payload.oauth2.provider);
-                    let nonce = crypto.randomBytes(12).toString('hex');
+                    const nonce = crypto.randomBytes(NONCE_BYTES).toString('base64url');
 
                     const accountData = request.payload;
 
@@ -1897,7 +2014,7 @@ When making API calls remember that requests against the same account are queued
                     await redis
                         .multi()
                         .set(`${REDIS_PREFIX}account:add:${nonce}`, JSON.stringify(accountData))
-                        .expire(`${REDIS_PREFIX}account:add:${nonce}`, 1 * 24 * 3600)
+                        .expire(`${REDIS_PREFIX}account:add:${nonce}`, Math.floor(MAX_FORM_TTL / 1000))
                         .exec();
 
                     // Generate the url that will be used for the consent dialog.
@@ -2045,7 +2162,10 @@ When making API calls remember that requests against the same account are queued
                     notifyFrom: request.payload.notifyFrom,
                     subconnections: request.payload.subconnections,
                     redirectUrl: request.payload.redirectUrl,
-                    delegated: request.payload.delegated
+                    delegated: request.payload.delegated,
+                    // identify request
+                    n: crypto.randomBytes(NONCE_BYTES).toString('base64'),
+                    t: Date.now()
                 });
 
                 let serviceUrl = await settings.get('serviceUrl');
@@ -2183,7 +2303,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.update(request.payload);
@@ -2277,7 +2403,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/reconnect',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return { reconnect: await accountObject.requestReconnect(request.payload) };
@@ -2337,7 +2469,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/sync',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return { sync: await accountObject.requestSync(request.payload) };
@@ -2402,7 +2540,8 @@ When making API calls remember that requests against the same account are queued
                 account: request.params.account,
                 documentsQueue,
                 call,
-                secret: await getSecret()
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
             });
 
             try {
@@ -2465,7 +2604,8 @@ When making API calls remember that requests against the same account are queued
                 account: request.params.account,
                 call,
                 secret: await getSecret(),
-                esClient: await h.getESClient(request.logger)
+                esClient: await h.getESClient(request.logger),
+                timeout: request.headers['x-ee-timeout']
             });
 
             try {
@@ -2529,7 +2669,13 @@ When making API calls remember that requests against the same account are queued
 
         async handler(request) {
             try {
-                let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+                let accountObject = new Account({
+                    redis,
+                    account: request.params.account,
+                    call,
+                    secret: await getSecret(),
+                    timeout: request.headers['x-ee-timeout']
+                });
 
                 return await accountObject.listAccounts(request.query.state, request.query.query, request.query.page, request.query.pageSize);
             } catch (err) {
@@ -2568,13 +2714,14 @@ When making API calls remember that requests against the same account are queued
 
                 query: Joi.object({
                     page: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024)
                         .default(0)
                         .example(0)
                         .description('Page number (zero indexed, so use 0 for first page)')
                         .label('PageNumber'),
-                    pageSize: Joi.number().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize'),
+                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize'),
                     state: Joi.string()
                         .valid('init', 'syncing', 'connecting', 'connected', 'authenticationError', 'connectError', 'unset', 'disconnected')
                         .example('connected')
@@ -2586,9 +2733,9 @@ When making API calls remember that requests against the same account are queued
 
             response: {
                 schema: Joi.object({
-                    total: Joi.number().example(120).description('How many matching entries').label('TotalNumber'),
-                    page: Joi.number().example(0).description('Current page (0-based index)').label('PageNumber'),
-                    pages: Joi.number().example(24).description('Total page count').label('PagesNumber'),
+                    total: Joi.number().integer().example(120).description('How many matching entries').label('TotalNumber'),
+                    page: Joi.number().integer().example(0).description('Current page (0-based index)').label('PageNumber'),
+                    pages: Joi.number().integer().example(24).description('Total page count').label('PagesNumber'),
 
                     accounts: Joi.array()
                         .items(
@@ -2616,6 +2763,9 @@ When making API calls remember that requests against the same account are queued
                                     .description('Account-specific webhook URL'),
                                 proxy: settingsSchema.proxyUrl,
                                 smtpEhloName: settingsSchema.smtpEhloName,
+
+                                counters: accountCountersSchema,
+
                                 syncTime: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('Last sync time'),
                                 lastError: lastErrorSchema.allow(null)
                             }).label('AccountResponseItem')
@@ -2632,7 +2782,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
             try {
                 let accountData = await accountObject.loadAccountData();
 
@@ -2718,6 +2874,14 @@ When making API calls remember that requests against the same account are queued
                     result.lastError = accountData.state === 'connected' ? null : accountData.lastErrorState;
                 }
 
+                if (accountData.counters) {
+                    result.counters = accountData.counters;
+                }
+
+                if (request.query.quota) {
+                    result.quota = await accountObject.getQuota();
+                }
+
                 return result;
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
@@ -2752,6 +2916,15 @@ When making API calls remember that requests against the same account are queued
 
                 params: Joi.object({
                     account: accountIdSchema.required()
+                }),
+
+                query: Joi.object({
+                    quota: Joi.boolean()
+                        .truthy('Y', 'true', '1')
+                        .falsy('N', 'false', 0)
+                        .default(false)
+                        .description('If true, then include quota information in the response')
+                        .label('AccountQuota')
                 })
             },
 
@@ -2759,7 +2932,7 @@ When making API calls remember that requests against the same account are queued
                 schema: Joi.object({
                     account: accountIdSchema.required(),
 
-                    name: Joi.string().max(256).required().example('My Email Account').description('Display name for the account'),
+                    name: Joi.string().max(256).example('My Email Account').description('Display name for the account'),
                     email: Joi.string().empty('').email().example('user@example.com').description('Default email address of the account'),
 
                     copy: Joi.boolean().example(true).description('Copy submitted messages to Sent folder'),
@@ -2794,7 +2967,21 @@ When making API calls remember that requests against the same account are queued
                         .description('Informational account state')
                         .label('AccountInfoState'),
 
-                    smtpStatus: Joi.object().unknown().description('Information about the last SMTP connection attempt').label('SMTPInfoStatus'),
+                    smtpStatus: Joi.object({
+                        created: Joi.date()
+                            .iso()
+                            .allow(null)
+                            .example('2021-07-08T07:06:34.336Z')
+                            .description('When was the status for SMTP connection last updated'),
+                        status: Joi.string().valid('ok', 'error').description('Was the last SMTP attempt successful or not'),
+                        response: Joi.string().example('250 OK').description('SMTP response message for delivery attempt'),
+                        description: Joi.string().example('Authentication failed').description('Error information'),
+                        responseCode: Joi.number().integer().example(500).description('Error status code'),
+                        code: Joi.string().example('EAUTH').description('Error type identifier'),
+                        command: Joi.string().example('AUTH PLAIN').description('SMTP command that failed')
+                    })
+                        .description('Information about the last SMTP connection attempt')
+                        .label('SMTPInfoStatus'),
 
                     locale: Joi.string().empty('').max(100).example('fr').description('Optional locale'),
                     tz: Joi.string().empty('').max(100).example('Europe/Tallinn').description('Optional timezone'),
@@ -2803,8 +2990,24 @@ When making API calls remember that requests against the same account are queued
                         .valid(...['imap'].concat(Object.keys(OAUTH_PROVIDERS)).concat('oauth2'))
                         .example('outlook')
                         .description('Account type')
+                        .label('AccountType')
                         .required(),
                     app: Joi.string().max(256).example('AAABhaBPHscAAAAH').description('OAuth2 application ID'),
+
+                    counters: accountCountersSchema,
+
+                    quota: Joi.object({
+                        usage: Joi.number().integer().example(8547884032).description('How many bytes has the account stored in emails'),
+                        limit: Joi.number().integer().example(16106127360).description('How many bytes can the account store emails'),
+                        status: Joi.string().example('53%').description('Textual information about the usage')
+                    })
+                        .label('AccountQuota')
+                        .allow(false)
+                        .description(
+                            'Account quota information if query argument quota=true. This value will be false if the server does not provide quota information.'
+                        ),
+
+                    syncTime: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('Last sync time'),
 
                     lastError: lastErrorSchema.allow(null)
                 }).label('AccountResponse'),
@@ -2818,7 +3021,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/mailboxes',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 let mailboxes = await accountObject.getMailboxListing(request.query);
@@ -2900,7 +3109,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/mailbox',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.createMailbox(request.payload.path);
@@ -2971,7 +3186,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/mailbox',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.renameMailbox(request.payload.path, request.payload.newPath);
@@ -3043,7 +3264,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/mailbox',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.deleteMailbox(request.query.path);
@@ -3105,7 +3332,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/message/{message}/source',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.getRawMessage(request.params.message);
@@ -3159,7 +3392,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/attachment/{attachment}',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.getAttachment(request.params.attachment);
@@ -3217,7 +3456,8 @@ When making API calls remember that requests against the same account are queued
                 account: request.params.account,
                 call,
                 secret: await getSecret(),
-                esClient: await h.getESClient(request.logger)
+                esClient: await h.getESClient(request.logger),
+                timeout: request.headers['x-ee-timeout']
             });
 
             try {
@@ -3255,6 +3495,7 @@ When making API calls remember that requests against the same account are queued
 
                 query: Joi.object({
                     maxBytes: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024 * 1024)
                         .example(5 * 1025 * 1024)
@@ -3316,7 +3557,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/message',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.uploadMessage(request.payload);
@@ -3403,7 +3650,16 @@ When making API calls remember that requests against the same account are queued
                         .description('Message reference for a reply or a forward. This is EmailEngine specific ID, not Message-ID header value.')
                         .label('MessageReference'),
 
-                    from: addressSchema.required().example({ name: 'From Me', address: 'sender@example.com' }),
+                    raw: Joi.string()
+                        .base64()
+                        .max(MAX_ATTACHMENT_SIZE)
+                        .example('TUlNRS1WZXJzaW9uOiAxLjANClN1YmplY3Q6IGhlbGxvIHdvcmxkDQoNCkhlbGxvIQ0K')
+                        .description(
+                            'Base64 encoded email message in rfc822 format. If you provide other keys as well then these will override the values in the raw message.'
+                        )
+                        .label('RFC822Raw'),
+
+                    from: addressSchema.example({ name: 'From Me', address: 'sender@example.com' }).description('The From address').label('FromAddress'),
 
                     to: Joi.array()
                         .items(addressSchema)
@@ -3475,9 +3731,9 @@ When making API calls remember that requests against the same account are queued
                         .description('Message ID. NB! This and other fields might not be present if server did not provide enough information')
                         .label('MessageAppendId'),
                     path: Joi.string().example('INBOX').description('Folder this message was uploaded to').label('MessageAppendPath'),
-                    uid: Joi.number().example(12345).description('UID of uploaded message'),
+                    uid: Joi.number().integer().example(12345).description('UID of uploaded message'),
                     uidValidity: Joi.string().example('12345').description('UIDVALIDTITY of the target folder. Numeric value cast as string.'),
-                    seq: Joi.number().example(12345).description('Sequence number of uploaded message'),
+                    seq: Joi.number().integer().example(12345).description('Sequence number of uploaded message'),
 
                     messageId: Joi.string().max(996).example('<test123@example.com>').description('Message ID'),
 
@@ -3505,7 +3761,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/message/{message}',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.updateMessage(request.params.message, request.payload);
@@ -3572,7 +3834,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/messages',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.updateMessages(request.query.path, request.payload.search, request.payload.update);
@@ -3645,7 +3913,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/message/{message}/move',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.moveMessage(request.params.message, request.payload);
@@ -3696,7 +3970,7 @@ When making API calls remember that requests against the same account are queued
                 schema: Joi.object({
                     path: Joi.string().required().example('INBOX').description('Target mailbox folder path'),
                     id: Joi.string().max(256).required().example('AAAAAQAACnA').description('Message ID'),
-                    uid: Joi.number().example(12345).description('UID of moved message')
+                    uid: Joi.number().integer().example(12345).description('UID of moved message')
                 }).label('MessageMoveResponse'),
                 failAction: 'log'
             }
@@ -3708,7 +3982,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/messages/move',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.moveMessages(request.query.path, request.payload.search, { path: request.payload.path });
@@ -3777,7 +4057,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/message/{message}',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.deleteMessage(request.params.message, request.query.force);
@@ -3846,7 +4132,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/messages/delete',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.deleteMessages(request.query.path, request.payload.search, request.query.force);
@@ -3928,7 +4220,8 @@ When making API calls remember that requests against the same account are queued
                 account: request.params.account,
                 call,
                 secret: await getSecret(),
-                esClient: await h.getESClient(request.logger)
+                esClient: await h.getESClient(request.logger),
+                timeout: request.headers['x-ee-timeout']
             });
 
             try {
@@ -3966,6 +4259,7 @@ When making API calls remember that requests against the same account are queued
 
                 query: Joi.object({
                     maxBytes: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024 * 1024)
                         .example(MAX_ATTACHMENT_SIZE)
@@ -4011,7 +4305,8 @@ When making API calls remember that requests against the same account are queued
                 account: request.params.account,
                 call,
                 secret: await getSecret(),
-                esClient: await h.getESClient(request.logger)
+                esClient: await h.getESClient(request.logger),
+                timeout: request.headers['x-ee-timeout']
             });
 
             try {
@@ -4054,13 +4349,14 @@ When making API calls remember that requests against the same account are queued
                 query: Joi.object({
                     path: Joi.string().required().example('INBOX').description('Mailbox folder path').label('Path'),
                     page: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024)
                         .default(0)
                         .example(0)
                         .description('Page number (zero indexed, so use 0 for first page)')
                         .label('PageNumber'),
-                    pageSize: Joi.number().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize'),
+                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize'),
                     documentStore: documentStoreSchema.default(false)
                 }).label('MessageQuery')
             },
@@ -4082,7 +4378,8 @@ When making API calls remember that requests against the same account are queued
                 account: request.params.account,
                 call,
                 secret: await getSecret(),
-                esClient: await h.getESClient(request.logger)
+                esClient: await h.getESClient(request.logger),
+                timeout: request.headers['x-ee-timeout']
             });
 
             let extraValidationErrors = [];
@@ -4156,12 +4453,13 @@ When making API calls remember that requests against the same account are queued
                         .example('INBOX')
                         .description('Mailbox folder path. Not required if `documentStore` is `true`'),
                     page: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024)
                         .default(0)
                         .example(0)
                         .description('Page number (zero indexed, so use 0 for first page)'),
-                    pageSize: Joi.number().min(1).max(1000).default(20).example(20).description('How many entries per page'),
+                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page'),
                     documentStore: documentStoreSchema.default(false),
                     exposeQuery: Joi.boolean()
                         .truthy('Y', 'true', '1')
@@ -4197,7 +4495,8 @@ When making API calls remember that requests against the same account are queued
                 redis,
                 call,
                 secret: await getSecret(),
-                esClient: await h.getESClient(request.logger)
+                esClient: await h.getESClient(request.logger),
+                timeout: request.headers['x-ee-timeout']
             });
 
             let extraValidationErrors = [];
@@ -4258,12 +4557,13 @@ When making API calls remember that requests against the same account are queued
 
                 query: Joi.object({
                     page: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024)
                         .default(0)
                         .example(0)
                         .description('Page number (zero indexed, so use 0 for first page)'),
-                    pageSize: Joi.number().min(1).max(1000).default(20).example(20).description('How many entries per page'),
+                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page'),
                     exposeQuery: Joi.boolean()
                         .truthy('Y', 'true', '1')
                         .falsy('N', 'false', 0)
@@ -4300,7 +4600,13 @@ When making API calls remember that requests against the same account are queued
         path: '/v1/account/{account}/submit',
 
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 return await accountObject.queueMessage(request.payload, { source: 'api' });
@@ -4396,7 +4702,20 @@ When making API calls remember that requests against the same account are queued
                             then: Joi.forbidden('y')
                         }),
 
-                    from: addressSchema.example({ name: 'From Me', address: 'sender@example.com' }).description('The From address').label('From'),
+                    raw: Joi.string()
+                        .base64()
+                        .max(MAX_ATTACHMENT_SIZE)
+                        .example('TUlNRS1WZXJzaW9uOiAxLjANClN1YmplY3Q6IGhlbGxvIHdvcmxkDQoNCkhlbGxvIQ0K')
+                        .description(
+                            'Base64 encoded email message in rfc822 format. If you provide other keys as well then these will override the values in the raw message.'
+                        )
+                        .label('RFC822Raw')
+                        .when('mailMerge', {
+                            is: Joi.exist().not(false, null),
+                            then: Joi.forbidden('y')
+                        }),
+
+                    from: addressSchema.example({ name: 'From Me', address: 'sender@example.com' }).description('The From address').label('FromAddress'),
 
                     replyTo: Joi.array()
                         .items(addressSchema.label('ReplyToAddress'))
@@ -4431,19 +4750,6 @@ When making API calls remember that requests against the same account are queued
                         .single()
                         .description('List of BCC addresses')
                         .label('BccAddressList')
-                        .when('mailMerge', {
-                            is: Joi.exist().not(false, null),
-                            then: Joi.forbidden('y')
-                        }),
-
-                    raw: Joi.string()
-                        .base64()
-                        .max(MAX_ATTACHMENT_SIZE)
-                        .example('TUlNRS1WZXJzaW9uOiAxLjANClN1YmplY3Q6IGhlbGxvIHdvcmxkDQoNCkhlbGxvIQ0K')
-                        .description(
-                            'Base64 encoded email message in rfc822 format. If you provide other keys as well then these will override the values in the raw message.'
-                        )
-                        .label('RFC822Raw')
                         .when('mailMerge', {
                             is: Joi.exist().not(false, null),
                             then: Joi.forbidden('y')
@@ -4544,7 +4850,10 @@ When making API calls remember that requests against the same account are queued
                     tz: Joi.string().empty('').max(100).example('Europe/Tallinn').description('Optional timezone'),
 
                     sendAt: Joi.date().iso().example('2021-07-08T07:06:34.336Z').description('Send message at specified time'),
-                    deliveryAttempts: Joi.number().example(10).description('How many delivery attempts to make until message is considered as failed'),
+                    deliveryAttempts: Joi.number()
+                        .integer()
+                        .example(10)
+                        .description('How many delivery attempts to make until message is considered as failed'),
                     gateway: Joi.string().max(256).example('example').description('Optional SMTP gateway ID for message routing'),
 
                     listId: Joi.string()
@@ -4903,10 +5212,13 @@ When making API calls remember that requests against the same account are queued
                 schema: Joi.object({
                     queue: Joi.string().empty('').trim().valid('notify', 'submit', 'documents').required().example('notify').description('Queue ID'),
                     jobs: Joi.object({
-                        active: Joi.number().example(123).description('Jobs that are currently being processed'),
-                        delayed: Joi.number().example(123).description('Jobs that are processed in the future'),
-                        paused: Joi.number().example(123).description('Jobs that would be processed once queue processing is resumed'),
-                        waiting: Joi.number().example(123).description('Jobs that should be processed, but are waiting until there are any free handlers')
+                        active: Joi.number().integer().example(123).description('Jobs that are currently being processed'),
+                        delayed: Joi.number().integer().example(123).description('Jobs that are processed in the future'),
+                        paused: Joi.number().integer().example(123).description('Jobs that would be processed once queue processing is resumed'),
+                        waiting: Joi.number()
+                            .integer()
+                            .example(123)
+                            .description('Jobs that should be processed, but are waiting until there are any free handlers')
                     }).label('QueueJobs'),
                     paused: Joi.boolean().example(false).description('Is the queue paused or not')
                 }).label('SettingsQueueResponse'),
@@ -5061,6 +5373,7 @@ When making API calls remember that requests against the same account are queued
 
                 query: Joi.object({
                     seconds: Joi.number()
+                        .integer()
                         .empty('')
                         .min(0)
                         .max(MAX_DAYS_STATS * 24 * 3600)
@@ -5075,17 +5388,17 @@ When making API calls remember that requests against the same account are queued
                 schema: Joi.object({
                     version: Joi.string().example(packageData.version).description('EmailEngine version number'),
                     license: Joi.string().example(packageData.license).description('EmailEngine license'),
-                    accounts: Joi.number().example(26).description('Number of registered accounts'),
+                    accounts: Joi.number().integer().example(26).description('Number of registered accounts'),
                     node: Joi.string().example('16.10.0').description('Node.js Version'),
                     redis: Joi.string().example('6.2.4').description('Redis Version'),
                     connections: Joi.object({
-                        init: Joi.number().example(2).description('Accounts not yet initialized'),
-                        connected: Joi.number().example(8).description('Successfully connected accounts'),
-                        connecting: Joi.number().example(7).description('Connection is being established'),
-                        authenticationError: Joi.number().example(3).description('Authentication failed'),
-                        connectError: Joi.number().example(5).description('Connection failed due to technical error'),
-                        unset: Joi.number().example(0).description('Accounts without valid IMAP settings'),
-                        disconnected: Joi.number().example(1).description('IMAP connection was closed')
+                        init: Joi.number().integer().example(2).description('Accounts not yet initialized'),
+                        connected: Joi.number().integer().example(8).description('Successfully connected accounts'),
+                        connecting: Joi.number().integer().example(7).description('Connection is being established'),
+                        authenticationError: Joi.number().integer().example(3).description('Authentication failed'),
+                        connectError: Joi.number().integer().example(5).description('Connection failed due to technical error'),
+                        unset: Joi.number().integer().example(0).description('Accounts without valid IMAP settings'),
+                        disconnected: Joi.number().integer().example(1).description('IMAP connection was closed')
                     })
                         .description('Counts of accounts in different connection states')
                         .label('ConnectionsStats'),
@@ -5181,7 +5494,7 @@ When making API calls remember that requests against the same account are queued
 
         async handler(request) {
             try {
-                const licenseInfo = await call({ cmd: 'license' });
+                const licenseInfo = await call({ cmd: 'license', timeout: request.headers['x-ee-timeout'] });
                 if (!licenseInfo) {
                     let err = new Error('Failed to load license info');
                     err.statusCode = 403;
@@ -5224,7 +5537,7 @@ When making API calls remember that requests against the same account are queued
 
         async handler(request) {
             try {
-                const licenseInfo = await call({ cmd: 'removeLicense' });
+                const licenseInfo = await call({ cmd: 'removeLicense', timeout: request.headers['x-ee-timeout'] });
                 if (!licenseInfo) {
                     let err = new Error('Failed to clear license info');
                     err.statusCode = 403;
@@ -5273,7 +5586,7 @@ When making API calls remember that requests against the same account are queued
 
         async handler(request) {
             try {
-                const licenseInfo = await call({ cmd: 'updateLicense', license: request.payload.license });
+                const licenseInfo = await call({ cmd: 'updateLicense', license: request.payload.license, timeout: request.headers['x-ee-timeout'] });
                 if (!licenseInfo) {
                     let err = new Error('Failed to update license. Check license file contents.');
                     err.statusCode = 403;
@@ -5386,6 +5699,7 @@ When making API calls remember that requests against the same account are queued
 
                         host: Joi.string().hostname().required().example('imap.gmail.com').description('Hostname to connect to'),
                         port: Joi.number()
+                            .integer()
                             .min(1)
                             .max(64 * 1024)
                             .required()
@@ -5400,6 +5714,7 @@ When making API calls remember that requests against the same account are queued
 
                         host: Joi.string().hostname().required().example('imap.gmail.com').description('Hostname to connect to'),
                         port: Joi.number()
+                            .integer()
                             .min(1)
                             .max(64 * 1024)
                             .required()
@@ -5457,21 +5772,22 @@ When making API calls remember that requests against the same account are queued
 
                 query: Joi.object({
                     page: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024)
                         .default(0)
                         .example(0)
                         .description('Page number (zero indexed, so use 0 for first page)')
                         .label('PageNumber'),
-                    pageSize: Joi.number().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
+                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
                 }).label('OutbixListFilter')
             },
 
             response: {
                 schema: Joi.object({
-                    total: Joi.number().example(120).description('How many matching entries').label('TotalNumber'),
-                    page: Joi.number().example(0).description('Current page (0-based index)').label('PageNumber'),
-                    pages: Joi.number().example(24).description('Total page count').label('PagesNumber'),
+                    total: Joi.number().integer().example(120).description('How many matching entries').label('TotalNumber'),
+                    page: Joi.number().integer().example(0).description('Current page (0-based index)').label('PageNumber'),
+                    pages: Joi.number().integer().example(24).description('Total page count').label('PagesNumber'),
 
                     messages: Joi.array()
                         .items(
@@ -5494,10 +5810,13 @@ When making API calls remember that requests against the same account are queued
 
                                 created: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('The time this message was queued'),
                                 scheduled: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('When this message is supposed to be delivered'),
-                                nextAttempt: Joi.date().iso().example('2021-02-17T13:43:18.860Z').allow(false).description('Next delivery attempt'),
+                                nextAttempt: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('Next delivery attempt'),
 
-                                attemptsMade: Joi.number().example(3).description('How many times EmailEngine has tried to deliver this email'),
-                                attempts: Joi.number().example(3).description('How many delivery attempts to make until message is considered as failed'),
+                                attemptsMade: Joi.number().integer().example(3).description('How many times EmailEngine has tried to deliver this email'),
+                                attempts: Joi.number()
+                                    .integer()
+                                    .example(3)
+                                    .description('How many delivery attempts to make until message is considered as failed'),
 
                                 progress: Joi.object({
                                     status: Joi.string()
@@ -5580,202 +5899,19 @@ When making API calls remember that requests against the same account are queued
         }
     });
 
-    server.route({
-        method: 'POST',
-        path: '/v1/templates/template',
+    // setup template routes
+    await templateRoutes({ server, call, CORS_CONFIG });
 
-        async handler(request) {
-            try {
-                if (request.payload.account) {
-                    // throws if account does not exist
-                    let accountObject = new Account({ redis, account: request.payload.account, call, secret: await getSecret() });
-                    await accountObject.loadAccountData();
-                }
-
-                return await templates.create(
-                    request.payload.account,
-                    {
-                        name: request.payload.name,
-                        description: request.payload.description,
-                        format: request.payload.format
-                    },
-                    request.payload.content
-                );
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-
-        options: {
-            description: 'Create template',
-            notes: 'Create a new stored template. Templates can be used when sending emails as the content of the message.',
-            tags: ['api', 'Templates'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                payload: Joi.object({
-                    account: Joi.string()
-                        .empty('')
-                        .trim()
-                        .allow(null)
-                        .max(256)
-                        .example('example')
-                        .description('Account ID. Use `null` for public templates.')
-                        .required(),
-
-                    name: Joi.string().max(256).example('Transaction receipt').description('Name of the template').label('TemplateName').required(),
-                    description: Joi.string()
-                        .allow('')
-                        .max(1024)
-                        .example('Something about the template')
-                        .description('Optional description of the template')
-                        .label('TemplateDescription'),
-                    format: Joi.string()
-                        .valid('html', 'mjml', 'markdown')
-                        .default('html')
-                        .description('Markup language for HTML ("html", "markdown" or "mjml")'),
-                    content: Joi.object({
-                        subject: templateSchemas.subject,
-                        text: templateSchemas.text,
-                        html: templateSchemas.html,
-                        previewText: templateSchemas.previewText
-                    })
-                        .required()
-                        .label('CreateTemplateContent')
-                }).label('CreateTemplate')
-            },
-
-            response: {
-                schema: Joi.object({
-                    created: Joi.boolean().description('Was the template created or not'),
-                    account: accountIdSchema.required(),
-                    id: Joi.string().max(256).required().example('example').description('Template ID')
-                }).label('CreateTemplateResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'PUT',
-        path: '/v1/templates/template/{template}',
-
-        async handler(request) {
-            try {
-                let meta = {};
-                for (let key of ['name', 'description', 'format']) {
-                    if (typeof request.payload[key] !== 'undefined') {
-                        meta[key] = request.payload[key];
-                    }
-                }
-
-                return await templates.update(request.params.template, meta, request.payload.content);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-
-        options: {
-            description: 'Update a template',
-            notes: 'Update a stored template.',
-            tags: ['api', 'Templates'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    template: Joi.string().max(256).required().example('example').description('Template ID')
-                }).label('GetTemplateRequest'),
-
-                payload: Joi.object({
-                    name: Joi.string().empty('').max(256).example('Transaction receipt').description('Name of the template').label('TemplateName'),
-                    description: Joi.string()
-                        .allow('')
-                        .max(1024)
-                        .example('Something about the template')
-                        .description('Optional description of the template')
-                        .label('TemplateDescription'),
-                    format: Joi.string()
-                        .empty('')
-                        .valid('html', 'mjml', 'markdown')
-                        .default('html')
-                        .description('Markup language for HTML ("html", "markdown" or "mjml")'),
-                    content: Joi.object({
-                        subject: templateSchemas.subject,
-                        text: templateSchemas.text,
-                        html: templateSchemas.html,
-                        previewText: templateSchemas.previewText
-                    }).label('UpdateTemplateContent')
-                }).label('UpdateTemplate')
-            },
-
-            response: {
-                schema: Joi.object({
-                    updated: Joi.boolean().description('Was the template updated or not'),
-                    account: accountIdSchema.required(),
-                    id: Joi.string().max(256).required().example('example').description('Template ID')
-                }).label('UpdateTemplateResponse'),
-                failAction: 'log'
-            }
-        }
-    });
+    // setup "chat with email" routes
+    await chatRoutes({ server, call, CORS_CONFIG });
 
     server.route({
         method: 'GET',
-        path: '/v1/templates',
+        path: '/v1/webhookRoutes',
 
         async handler(request) {
             try {
-                if (request.query.account) {
-                    // throws if account does not exist
-                    let accountObject = new Account({ redis, account: request.query.account, call, secret: await getSecret() });
-                    await accountObject.loadAccountData();
-                }
-
-                return await templates.list(request.query.account, request.query.page, request.query.pageSize);
+                return await Webhooks.list(request.query.page, request.query.pageSize);
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
                 if (Boom.isBoom(err)) {
@@ -5790,9 +5926,9 @@ When making API calls remember that requests against the same account are queued
         },
 
         options: {
-            description: 'List account templates',
-            notes: 'Lists stored templates for the account',
-            tags: ['api', 'Templates'],
+            description: 'List webhook routes',
+            notes: 'List custom webhook routes',
+            tags: ['api', 'Webhooks'],
 
             plugins: {},
 
@@ -5811,47 +5947,44 @@ When making API calls remember that requests against the same account are queued
                 failAction,
 
                 query: Joi.object({
-                    account: Joi.string().empty('').max(256).example('example').description('Account ID to list the templates for'),
-
                     page: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024)
                         .default(0)
                         .example(0)
                         .description('Page number (zero indexed, so use 0 for first page)')
                         .label('PageNumber'),
-                    pageSize: Joi.number().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
-                }).label('AccountTemplatesRequest')
+                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
+                }).label('WebhookRoutesListRequest')
             },
 
             response: {
                 schema: Joi.object({
-                    account: accountIdSchema.required(),
-                    total: Joi.number().example(120).description('How many matching entries').label('TotalNumber'),
-                    page: Joi.number().example(0).description('Current page (0-based index)').label('PageNumber'),
-                    pages: Joi.number().example(24).description('Total page count').label('PagesNumber'),
+                    total: Joi.number().integer().example(120).description('How many matching entries').label('TotalNumber'),
+                    page: Joi.number().integer().example(0).description('Current page (0-based index)').label('PageNumber'),
+                    pages: Joi.number().integer().example(24).description('Total page count').label('PagesNumber'),
 
-                    templates: Joi.array()
+                    webhooks: Joi.array()
                         .items(
                             Joi.object({
-                                id: Joi.string().max(256).required().example('AAABgS-UcAYAAAABAA').description('Template ID'),
-                                name: Joi.string().max(256).example('Transaction receipt').description('Name of the template').label('TemplateName').required(),
+                                id: Joi.string().max(256).required().example('AAABgS-UcAYAAAABAA').description('Webhook ID'),
+                                name: Joi.string().max(256).example('Send to Slack').description('Name of the route').label('WebhookRouteName').required(),
                                 description: Joi.string()
                                     .allow('')
                                     .max(1024)
-                                    .example('Something about the template')
-                                    .description('Optional description of the template')
-                                    .label('TemplateDescription'),
-                                format: Joi.string()
-                                    .valid('html', 'mjml', 'markdown')
-                                    .default('html')
-                                    .description('Markup language for HTML ("html", "markdown" or "mjml")'),
-                                created: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('The time this template was created'),
-                                updated: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('The time this template was last updated')
-                            }).label('AccountTemplate')
+                                    .example('Something about the route')
+                                    .description('Optional description of the webhook route')
+                                    .label('WebhookRouteDescription'),
+                                created: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('The time this route was created'),
+                                updated: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('The time this route was last updated'),
+                                enabled: Joi.boolean().example(true).description('Is the route enabled').label('WebhookRouteEnabled'),
+                                targetUrl: settingsSchema.webhooks,
+                                tcount: Joi.number().integer().example(123).description('How many times this route has been applied')
+                            }).label('WebhookRoutesListEntry')
                         )
-                        .label('AccountTemplatesList')
-                }).label('AccountTemplatesResponse'),
+                        .label('WebhookRoutesList')
+                }).label('WebhookRoutesListResponse'),
                 failAction: 'log'
             }
         }
@@ -5859,11 +5992,11 @@ When making API calls remember that requests against the same account are queued
 
     server.route({
         method: 'GET',
-        path: '/v1/templates/template/{template}',
+        path: '/v1/webhookRoutes/webhookRoute/{webhookRoute}',
 
         async handler(request) {
             try {
-                return await templates.get(request.params.template);
+                return await Webhooks.get(request.params.webhookRoute);
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
                 if (Boom.isBoom(err)) {
@@ -5878,9 +6011,9 @@ When making API calls remember that requests against the same account are queued
         },
 
         options: {
-            description: 'Get template information',
-            notes: 'Retrieve template content and information',
-            tags: ['api', 'Templates'],
+            description: 'Get webhook route information',
+            notes: 'Retrieve webhook route content and information',
+            tags: ['api', 'Webhooks'],
 
             plugins: {},
 
@@ -5898,164 +6031,30 @@ When making API calls remember that requests against the same account are queued
                 },
                 failAction,
                 params: Joi.object({
-                    template: Joi.string().max(256).required().example('example').description('Template ID')
-                }).label('GetTemplateRequest')
+                    webhookRoute: Joi.string().max(256).required().example('example').description('Webhook ID')
+                }).label('GetWebhookRouteRequest')
             },
 
             response: {
                 schema: Joi.object({
-                    account: accountIdSchema.required(),
-                    id: Joi.string().max(256).required().example('AAABgS-UcAYAAAABAA').description('Template ID'),
-                    name: Joi.string().max(256).example('Transaction receipt').description('Name of the template').label('TemplateName').required(),
+                    id: Joi.string().max(256).required().example('AAABgS-UcAYAAAABAA').description('Webhook ID'),
+                    name: Joi.string().max(256).example('Send to Slack').description('Name of the route').label('WebhookRouteName').required(),
                     description: Joi.string()
                         .allow('')
                         .max(1024)
-                        .example('Something about the template')
-                        .description('Optional description of the template')
-                        .label('TemplateDescription'),
-                    format: Joi.string()
-                        .valid('html', 'mjml', 'markdown')
-                        .default('html')
-                        .description('Markup language for HTML ("html", "markdown" or "mjml")'),
-                    created: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('The time this template was created'),
-                    updated: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('The time this template was last updated'),
+                        .example('Something about the route')
+                        .description('Optional description of the webhook route')
+                        .label('WebhookRouteDescription'),
+                    created: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('The time this route was created'),
+                    updated: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('The time this route was last updated'),
+                    enabled: Joi.boolean().example(true).description('Is the route enabled').label('WebhookRouteEnabled'),
+                    targetUrl: settingsSchema.webhooks,
+                    tcount: Joi.number().integer().example(123).description('How many times this route has been applied'),
                     content: Joi.object({
-                        subject: templateSchemas.subject,
-                        text: templateSchemas.text,
-                        html: templateSchemas.html,
-                        previewText: templateSchemas.previewText,
-                        format: Joi.string()
-                            .valid('html', 'mjml', 'markdown')
-                            .default('html')
-                            .description('Markup language for HTML ("html", "markdown" or "mjml")')
-                    }).label('RequestTemplateContent')
-                }).label('AccountTemplateResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'DELETE',
-        path: '/v1/templates/template/{template}',
-
-        async handler(request) {
-            try {
-                return await templates.del(request.params.template);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Remove a template',
-            notes: 'Delete a stored template',
-            tags: ['api', 'Templates'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    template: Joi.string().max(256).required().example('example').description('Template ID')
-                }).label('GetTemplateRequest')
-            },
-
-            response: {
-                schema: Joi.object({
-                    deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the template deleted'),
-                    account: accountIdSchema.required(),
-                    id: Joi.string().max(256).required().example('AAABgS-UcAYAAAABAA').description('Template ID')
-                }).label('DeleteTemplateRequestResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'DELETE',
-        path: '/v1/templates/account/{account}',
-
-        async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
-
-            try {
-                // throws if account does not exist
-                await accountObject.loadAccountData();
-
-                return await templates.flush(request.params.account);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Flush templates',
-            notes: 'Delete all stored templates for an account',
-            tags: ['api', 'Templates'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-
-                query: Joi.object({
-                    force: Joi.boolean()
-                        .truthy('Y', 'true', '1')
-                        .falsy('N', 'false', 0)
-                        .default(false)
-                        .valid(true)
-                        .description('Must be true in order to flush templates')
-                        .label('ForceFlush')
-                }).label('FlushTemplateQuerye')
-            },
-
-            response: {
-                schema: Joi.object({
-                    deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the account flushed'),
-                    account: accountIdSchema.required()
-                }).label('DeleteTemplateRequestResponse'),
+                        fn: Joi.string().example('return true;').description('Filter function'),
+                        map: Joi.string().example('payload.ts = Date.now(); return payload;').description('Mapping function')
+                    }).label('WebhookRouteContent')
+                }).label('WebhookRouteResponse'),
                 failAction: 'log'
             }
         }
@@ -6130,21 +6129,22 @@ When making API calls remember that requests against the same account are queued
 
                 query: Joi.object({
                     page: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024)
                         .default(0)
                         .example(0)
                         .description('Page number (zero indexed, so use 0 for first page)')
                         .label('PageNumber'),
-                    pageSize: Joi.number().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
+                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
                 }).label('GatewaysFilter')
             },
 
             response: {
                 schema: Joi.object({
-                    total: Joi.number().example(120).description('How many matching entries').label('TotalNumber'),
-                    page: Joi.number().example(0).description('Current page (0-based index)').label('PageNumber'),
-                    pages: Joi.number().example(24).description('Total page count').label('PagesNumber'),
+                    total: Joi.number().integer().example(120).description('How many matching entries').label('TotalNumber'),
+                    page: Joi.number().integer().example(0).description('Current page (0-based index)').label('PageNumber'),
+                    pages: Joi.number().integer().example(24).description('Total page count').label('PagesNumber'),
 
                     apps: Joi.array()
                         .items(
@@ -6181,7 +6181,7 @@ When making API calls remember that requests against the same account are queued
                                     .example('4f05f488-d858-4f2c-bd12-1039062612fe')
                                     .description('Client or Application ID for 3-legged OAuth2 applications'),
                                 clientSecret: Joi.string()
-                                    .valid('******')
+                                    .example('******')
                                     .description('Client secret for 3-legged OAuth2 applications. Actual value is not revealed.'),
                                 authority: Joi.string().example('common').description('Authorization tenant value for Outlook OAuth2 applications'),
                                 redirectUrl: Joi.string()
@@ -6194,7 +6194,7 @@ When making API calls remember that requests against the same account are queued
 
                                 serviceClient: Joi.string().example('9103965568215821627203').description('Service client ID for 2-legged OAuth2 applications'),
                                 serviceKey: Joi.string()
-                                    .valid('******')
+                                    .example('******')
                                     .description('PEM formatted service secret for 2-legged OAuth2 applications. Actual value is not revealed.'),
 
                                 lastError: lastErrorSchema.allow(null)
@@ -6308,7 +6308,7 @@ When making API calls remember that requests against the same account are queued
                     clientId: Joi.string()
                         .example('4f05f488-d858-4f2c-bd12-1039062612fe')
                         .description('Client or Application ID for 3-legged OAuth2 applications'),
-                    clientSecret: Joi.string().valid('******').description('Client secret for 3-legged OAuth2 applications. Actual value is not revealed.'),
+                    clientSecret: Joi.string().example('******').description('Client secret for 3-legged OAuth2 applications. Actual value is not revealed.'),
                     authority: Joi.string().example('common').description('Authorization tenant value for Outlook OAuth2 applications'),
                     redirectUrl: Joi.string()
                         .uri({
@@ -6320,10 +6320,13 @@ When making API calls remember that requests against the same account are queued
 
                     serviceClient: Joi.string().example('9103965568215821627203').description('Service client ID for 2-legged OAuth2 applications'),
                     serviceKey: Joi.string()
-                        .valid('******')
+                        .example('******')
                         .description('PEM formatted service secret for 2-legged OAuth2 applications. Actual value is not revealed.'),
 
-                    accounts: Joi.number().example(12).description('The number of accounts registered with this application. Not available for legacy apps.'),
+                    accounts: Joi.number()
+                        .integer()
+                        .example(12)
+                        .description('The number of accounts registered with this application. Not available for legacy apps.'),
 
                     lastError: lastErrorSchema.allow(null)
                 }).label('ApplicationResponse'),
@@ -6432,9 +6435,9 @@ When making API calls remember that requests against the same account are queued
                 }),
 
                 payload: Joi.object({
-                    name: Joi.string().trim().empty('').max(256).example('My Gmail App').required().description('Application name'),
-                    description: Joi.string().trim().empty('').max(1024).example('My cool app').description('Application description'),
-                    title: Joi.string().empty('').trim().max(256).example('App title').description('Title for the application button'),
+                    name: Joi.string().trim().empty('').max(256).example('My Gmail App').description('Application name'),
+                    description: Joi.string().trim().allow('').max(1024).example('My cool app').description('Application description'),
+                    title: Joi.string().allow('').trim().max(256).example('App title').description('Title for the application button'),
 
                     enabled: Joi.boolean().truthy('Y', 'true', '1', 'on').falsy('N', 'false', 0, '').example(true).description('Enable this app'),
 
@@ -6452,7 +6455,16 @@ When making API calls remember that requests against the same account are queued
                         .example('boT7Q~dUljnfFdVuqpC11g8nGMjO8kpRAv-ZB')
                         .description('Client secret for 3-legged OAuth2 applications'),
 
+                    baseScopes: Joi.string()
+                        .empty('')
+                        .trim()
+                        .valid(...['imap'].concat(featureFlags.enabled('gmail api') ? 'api' : []))
+                        .example('imap')
+                        .description('OAuth2 Base Scopes'),
+
                     extraScopes: Joi.array().items(Joi.string().trim().max(255).example('User.Read')).description('OAuth2 Extra Scopes'),
+
+                    skipScopes: Joi.array().items(Joi.string().trim().max(255).example('SMTP.Send')).description('OAuth2 scopes to skip from the base set'),
 
                     serviceClient: Joi.string()
                         .trim()
@@ -6542,7 +6554,10 @@ When making API calls remember that requests against the same account are queued
                 schema: Joi.object({
                     id: Joi.string().max(256).required().example('AAABhaBPHscAAAAH').description('OAuth2 application ID'),
                     deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the gateway deleted'),
-                    accounts: Joi.number().example(12).description('The number of accounts registered with this application. Not available for legacy apps.')
+                    accounts: Joi.number()
+                        .integer()
+                        .example(12)
+                        .description('The number of accounts registered with this application. Not available for legacy apps.')
                 }).label('DeleteAppRequestResponse'),
                 failAction: 'log'
             }
@@ -6594,28 +6609,29 @@ When making API calls remember that requests against the same account are queued
 
                 query: Joi.object({
                     page: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024)
                         .default(0)
                         .example(0)
                         .description('Page number (zero indexed, so use 0 for first page)')
                         .label('PageNumber'),
-                    pageSize: Joi.number().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
+                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
                 }).label('GatewaysFilter')
             },
 
             response: {
                 schema: Joi.object({
-                    total: Joi.number().example(120).description('How many matching entries').label('TotalNumber'),
-                    page: Joi.number().example(0).description('Current page (0-based index)').label('PageNumber'),
-                    pages: Joi.number().example(24).description('Total page count').label('PagesNumber'),
+                    total: Joi.number().integer().example(120).description('How many matching entries').label('TotalNumber'),
+                    page: Joi.number().integer().example(0).description('Current page (0-based index)').label('PageNumber'),
+                    pages: Joi.number().integer().example(24).description('Total page count').label('PagesNumber'),
 
                     gateways: Joi.array()
                         .items(
                             Joi.object({
                                 gateway: Joi.string().max(256).required().example('example').description('Gateway ID'),
                                 name: Joi.string().max(256).example('My Email Gateway').description('Display name for the gateway'),
-                                deliveries: Joi.number().empty('').example(100).description('Count of email deliveries using this gateway'),
+                                deliveries: Joi.number().integer().empty('').example(100).description('Count of email deliveries using this gateway'),
                                 lastUse: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('Last delivery time'),
                                 lastError: lastErrorSchema.allow(null)
                             }).label('GatewayResponseItem')
@@ -6691,7 +6707,7 @@ When making API calls remember that requests against the same account are queued
                     gateway: Joi.string().max(256).required().example('example').description('Gateway ID'),
 
                     name: Joi.string().max(256).required().example('My Email Gateway').description('Display name for the gateway'),
-                    deliveries: Joi.number().empty('').example(100).description('Count of email deliveries using this gateway'),
+                    deliveries: Joi.number().integer().empty('').example(100).description('Count of email deliveries using this gateway'),
                     lastUse: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('Last delivery time'),
 
                     user: Joi.string().empty('').trim().max(1024).label('UserName'),
@@ -6699,6 +6715,7 @@ When making API calls remember that requests against the same account are queued
 
                     host: Joi.string().hostname().example('smtp.gmail.com').description('Hostname to connect to').label('Hostname'),
                     port: Joi.number()
+                        .integer()
                         .min(1)
                         .max(64 * 1024)
                         .example(465)
@@ -6774,6 +6791,7 @@ When making API calls remember that requests against the same account are queued
 
                     host: Joi.string().hostname().example('smtp.gmail.com').description('Hostname to connect to').label('Hostname').required(),
                     port: Joi.number()
+                        .integer()
                         .min(1)
                         .max(64 * 1024)
                         .example(465)
@@ -6855,6 +6873,7 @@ When making API calls remember that requests against the same account are queued
 
                     host: Joi.string().hostname().empty('').example('smtp.gmail.com').description('Hostname to connect to').label('Hostname'),
                     port: Joi.number()
+                        .integer()
                         .min(1)
                         .empty('')
                         .max(64 * 1024)
@@ -6953,51 +6972,16 @@ When making API calls remember that requests against the same account are queued
                 throw error;
             }
 
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
-                // throws if account does not exist
-                let accountData = await accountObject.loadAccountData();
-                if (!accountData.oauth2 || !accountData.oauth2.auth || !accountData.oauth2.auth.user || !accountData.oauth2.provider) {
-                    let error = Boom.boomify(new Error('Not an OAuth2 account'), { statusCode: 403 });
-                    error.output.payload.code = 'AccountNotOAuth2';
-                    throw error;
-                }
-
-                let now = Date.now();
-                let accessToken;
-                let cached = false;
-                if (!accountData.oauth2.accessToken || !accountData.oauth2.expires || accountData.oauth2.expires < new Date(now - 30 * 1000)) {
-                    // renew access token
-                    try {
-                        accountData = await accountObject.renewAccessToken();
-                        accessToken = accountData.oauth2.accessToken;
-                    } catch (err) {
-                        let error = Boom.boomify(err, { statusCode: 403 });
-                        error.output.payload.code = 'OauthRenewError';
-                        error.output.payload.authenticationFailed = true;
-                        if (err.tokenRequest) {
-                            error.output.payload.tokenRequest = err.tokenRequest;
-                        }
-                        throw error;
-                    }
-                } else {
-                    accessToken = accountData.oauth2.accessToken;
-                    cached = true;
-                }
-
-                return {
-                    account: accountData.account,
-                    user: accountData.oauth2.auth.user,
-                    accessToken,
-                    provider: accountData.oauth2.auth.provider,
-                    registeredScopes: accountData.oauth2.scope,
-                    expires:
-                        accountData.oauth2.expires && typeof accountData.oauth2.expires.toISOString === 'function'
-                            ? accountData.oauth2.expires.toISOString()
-                            : accountData.oauth2.expires,
-                    cached
-                };
+                return await accountObject.getActiveAccessTokenData();
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
                 if (Boom.isBoom(err)) {
@@ -7052,7 +7036,13 @@ When making API calls remember that requests against the same account are queued
         method: 'POST',
         path: '/v1/delivery-test/account/{account}',
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.params.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 // throws if account does not exist
@@ -7386,27 +7376,28 @@ ${now}`,
 
                 query: Joi.object({
                     page: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024)
                         .default(0)
                         .example(0)
                         .description('Page number (zero indexed, so use 0 for first page)')
                         .label('PageNumber'),
-                    pageSize: Joi.number().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
+                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
                 }).label('PageListsRequest')
             },
 
             response: {
                 schema: Joi.object({
-                    total: Joi.number().example(120).description('How many matching entries').label('TotalNumber'),
-                    page: Joi.number().example(0).description('Current page (0-based index)').label('PageNumber'),
-                    pages: Joi.number().example(24).description('Total page count').label('PagesNumber'),
+                    total: Joi.number().integer().example(120).description('How many matching entries').label('TotalNumber'),
+                    page: Joi.number().integer().example(0).description('Current page (0-based index)').label('PageNumber'),
+                    pages: Joi.number().integer().example(24).description('Total page count').label('PagesNumber'),
 
                     blocklists: Joi.array()
                         .items(
                             Joi.object({
                                 listId: Joi.string().max(256).required().example('example').description('List ID'),
-                                count: Joi.number().example(12).description('Count of blocked addresses in this list')
+                                count: Joi.number().integer().example(12).description('Count of blocked addresses in this list')
                             }).label('BlocklistsResponseItem')
                         )
                         .label('BlocklistsEntries')
@@ -7468,22 +7459,23 @@ ${now}`,
 
                 query: Joi.object({
                     page: Joi.number()
+                        .integer()
                         .min(0)
                         .max(1024 * 1024)
                         .default(0)
                         .example(0)
                         .description('Page number (zero indexed, so use 0 for first page)')
                         .label('PageNumber'),
-                    pageSize: Joi.number().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
+                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize')
                 }).label('PageListsRequest')
             },
 
             response: {
                 schema: Joi.object({
                     listId: Joi.string().max(256).required().example('example').description('List ID'),
-                    total: Joi.number().example(120).description('How many matching entries').label('TotalNumber'),
-                    page: Joi.number().example(0).description('Current page (0-based index)').label('PageNumber'),
-                    pages: Joi.number().example(24).description('Total page count').label('PagesNumber'),
+                    total: Joi.number().integer().example(120).description('How many matching entries').label('TotalNumber'),
+                    page: Joi.number().integer().example(0).description('Current page (0-based index)').label('PageNumber'),
+                    pages: Joi.number().integer().example(24).description('Total page count').label('PagesNumber'),
                     addresses: Joi.array()
                         .items(
                             Joi.object({
@@ -7513,7 +7505,13 @@ ${now}`,
         method: 'POST',
         path: '/v1/blocklist/{listId}',
         async handler(request) {
-            let accountObject = new Account({ redis, account: request.payload.account, call, secret: await getSecret() });
+            let accountObject = new Account({
+                redis,
+                account: request.payload.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
 
             try {
                 // throws if account does not exist
@@ -7529,7 +7527,7 @@ ${now}`,
                         account: request.payload.account,
                         source: 'api',
                         reason: request.payload.reason,
-                        remoteAddress: request.info.remoteAddress,
+                        remoteAddress: request.app.ip,
                         userAgent: request.headers['user-agent'],
                         created: new Date().toISOString()
                     })
@@ -7591,7 +7589,7 @@ ${now}`,
 
             response: {
                 schema: Joi.object({
-                    success: Joi.boolean().example(true).description('Was the request successfuk').label('BlocklistListAddSuccess'),
+                    success: Joi.boolean().example(true).description('Was the request successful').label('BlocklistListAddSuccess'),
                     added: Joi.boolean().example(true).description('Was the address added to the list')
                 }).label('BlocklistListAddResponse'),
                 failAction: 'log'
@@ -7755,6 +7753,39 @@ ${now}`,
 
         async context(request) {
             const pendingMessages = await flash(redis, request);
+            const {
+                upgrade: upgradeInfo,
+                subexp,
+                outlookAuthFlag,
+                gmailAuthFlag,
+                gmailServiceAuthFlag,
+                webhookErrorFlag,
+                webhooksEnabled,
+                disableTokens,
+                tract,
+                templateHeader: embeddedTemplateHeader,
+                documentStoreEnabled: showDocumentStore,
+                serviceUrl,
+                language,
+                timezone
+            } = await settings.getMulti(
+                'upgrade',
+                'subexp',
+                'outlookAuthFlag',
+                'gmailAuthFlag',
+                'gmailServiceAuthFlag',
+                'webhookErrorFlag',
+                'webhooksEnabled',
+                'disableTokens',
+                'tract',
+                'templateHeader',
+                'documentStoreEnabled',
+                'serviceUrl',
+                'language',
+                'timezone'
+            );
+
+            const systemAlerts = [];
             let authData;
 
             switch (request.auth.artifacts && request.auth.artifacts.provider) {
@@ -7790,8 +7821,6 @@ ${now}`,
                     break;
             }
 
-            let systemAlerts = [];
-            let upgradeInfo = await settings.get('upgrade');
             if (upgradeInfo && upgradeInfo.canUpgrade) {
                 systemAlerts.push({
                     url: '/admin/upgrade',
@@ -7801,7 +7830,6 @@ ${now}`,
                 });
             }
 
-            let subexp = await settings.get('subexp');
             if (subexp) {
                 let delayMs = new Date(subexp) - Date.now();
                 let expiresDays = Math.max(Math.ceil(delayMs / (24 * 3600 * 1000)), 0);
@@ -7814,7 +7842,6 @@ ${now}`,
                 });
             }
 
-            let outlookAuthFlag = await settings.get('outlookAuthFlag');
             if (outlookAuthFlag && outlookAuthFlag.message) {
                 systemAlerts.push({
                     url: outlookAuthFlag.url || '/admin/config/oauth/app/outlook',
@@ -7824,7 +7851,6 @@ ${now}`,
                 });
             }
 
-            let gmailAuthFlag = await settings.get('gmailAuthFlag');
             if (gmailAuthFlag && gmailAuthFlag.message) {
                 systemAlerts.push({
                     url: gmailAuthFlag.url || '/admin/config/oauth/app/gmail',
@@ -7834,7 +7860,6 @@ ${now}`,
                 });
             }
 
-            let gmailServiceAuthFlag = await settings.get('gmailServiceAuthFlag');
             if (gmailServiceAuthFlag && gmailServiceAuthFlag.message) {
                 systemAlerts.push({
                     url: gmailServiceAuthFlag.url || '/admin/config/oauth/app/gmailService',
@@ -7844,8 +7869,6 @@ ${now}`,
                 });
             }
 
-            let webhookErrorFlag = await settings.get('webhookErrorFlag');
-            let webhooksEnabled = await settings.get('webhooksEnabled');
             if (webhooksEnabled && webhookErrorFlag && webhookErrorFlag.message) {
                 systemAlerts.push({
                     url: '/admin/config/webhooks',
@@ -7884,7 +7907,6 @@ ${now}`,
                 });
             }
 
-            let disableTokens = await settings.get('disableTokens');
             if (disableTokens) {
                 systemAlerts.push({
                     url: '/admin/config/service#security',
@@ -7911,14 +7933,15 @@ ${now}`,
                 pendingMessages,
                 licenseInfo: request.app.licenseInfo,
                 licenseDetails,
-                trialPossible: !(await settings.get('tract')),
+                trialPossible: !tract,
                 referrerPolicy,
                 authData,
                 packageData,
                 systemAlerts,
-                embeddedTemplateHeader: await settings.get('templateHeader'),
+                embeddedTemplateHeader,
                 currentYear: new Date().getFullYear(),
-                showDocumentStore: await settings.get('documentStoreEnabled')
+                showDocumentStore,
+                updateBrowserInfo: !serviceUrl || !language || !timezone
             };
         }
     });
@@ -8056,7 +8079,7 @@ ${now}`,
         path: '/metrics',
 
         async handler(request, h) {
-            const renderedMetrics = await call({ cmd: 'metrics' });
+            const renderedMetrics = await call({ cmd: 'metrics', timeout: request.headers['x-ee-timeout'] });
             const response = h.response('success');
             response.type('text/plain');
             return renderedMetrics;
@@ -8146,5 +8169,5 @@ init()
     })
     .catch(err => {
         logger.error({ msg: 'Failed to initialize API', err });
-        setImmediate(() => process.exit(3));
+        logger.flush(() => process.exit(3));
     });

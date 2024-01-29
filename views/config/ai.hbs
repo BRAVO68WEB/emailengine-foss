@@ -1,0 +1,811 @@
+<div class="d-sm-flex align-items-center justify-content-between mb-1">
+    <h1 class="h3 mb-0 text-gray-800">
+
+        <small><i class="fas fa-robot fa-fw"></i></small>
+        LLM Integration
+
+        <span class="badge badge-dark">beta</span>
+    </h1>
+</div>
+
+<p>You can use EmailEngine's LLM integration to enhance your emails by sending them to the OpenAI API with a custom
+    prompt. Once analyzed, the returned data in JSON format is attached to the email object. <a href="#" tabindex="-1"
+        role="button" data-toggle="popover" data-trigger="hover" style="dispaly: inline-block;" data-title="PII alert"
+        data-content="EmailEngine uploads the text content of incoming emails to the API servers of OpenAI. Uploaded content is not used for training, but you need to verify if OpenAPI terms are in accordance with your data processing agreements with your users."><i
+            class="fas fa-info-circle"></i></a>
+</p>
+
+<form method="post" id="settings-form" action="/admin/config/ai">
+    <input type="hidden" id="crumb" name="crumb" value="{{crumb}}" />
+    <input type="hidden" id="fn-content-element" name="contentFnJson" value="{{values.contentFnJson}}">
+
+    <div class="card mb-4" id="openai_settings">
+        <div class="card-header py-3">
+            <h6 class="m-0 font-weight-bold text-primary">General settings</h6>
+        </div>
+
+        {{#if openAiError}}
+        <div class="card-body">
+            <div class="alert alert-danger clear-alert-btn mb-0" data-clear-alert="open-ai">
+                <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+
+                <p><strong>NB!</strong> The last attempted OpenAI request failed with the response below.</p>
+                <hr>
+                <p class="mb-0">
+                    <code>{{openAiError.message}}{{#if openAiError.code}} ({{openAiError.code}}){{/if}}</code>
+                </p>
+            </div>
+        </div>
+        {{/if}}
+
+        <ul class="list-group list-group-flush mb-3">
+            <li class="list-group-item d-flex justify-content-between align-items-top">
+
+                <div class="form-group form-check mb-0">
+
+
+                    <input type="checkbox" class="form-check-input {{#if errors.generateEmailSummary}}is-invalid{{/if}}"
+                        id="generateEmailSummary" name="generateEmailSummary" {{#if
+                        values.generateEmailSummary}}checked{{/if}} />
+                    <label class="form-check-label" for="generateEmailSummary">Enable email processing with
+                        AI</label>
+                    {{#if errors.generateEmailSummary}}
+                    <span class="invalid-feedback">{{errors.generateEmailSummary}}</span>
+                    {{/if}}
+                    <small class="form-text text-muted">EmailEngine will send new emails to OpenAI API for
+                        processing and uses the response data to enrich the email information for
+                        <code>messageNew</code> webhooks.</small>
+                </div>
+
+                <div class="text-right">
+                    <div class="text-muted code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
+                            target="_blank">generateEmailSummary</a>]</div>
+                    {{#if
+                    values.generateEmailSummary}}
+                    <span class="badge badge-success badge-pill">enabled</span>
+                    {{else}}
+                    <span class="badge badge-warning badge-pill">disabled</span>
+                    {{/if}}
+                </div>
+            </li>
+        </ul>
+        <div class="card-body">
+
+
+            <div class="form-group">
+
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
+                        target="_blank">openAiAPIKey</a>]
+                </div>
+
+                <label for="openAiAPIKey">OpenAI API key</label>
+                <input type="password" class="form-control {{#if errors.openAiAPIKey}}is-invalid{{/if}}"
+                    id="openAiAPIKey" name="openAiAPIKey" value="{{values.openAiAPIKey}}" data-lpignore="true"
+                    autocomplete="off" {{#if hasOpenAiAPIKey}} placeholder="API key is set but not shown&mldr;"
+                    {{/if}} />
+                {{#if errors.openAiAPIKey}}
+                <span class="invalid-feedback">{{errors.openAiAPIKey}}</span>
+                {{/if}}
+                <small class="form-text text-muted">OpenAI API key.</small>
+            </div>
+
+            <div class="form-group">
+
+
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
+                        target="_blank">openAiModel</a>]</div>
+
+                <div>
+                    <label for="settingsServiceOpenAiModel">OpenAI Model</label>
+
+                    <button class="btn btn-link" id="reload-btn">
+                        <i class="fas fa-sync-alt fa-fw"></i>
+                        Reload models list</button>
+                </div>
+
+                <select id="settingsServiceOpenAiModel" class="custom-select custom-select-sm" name="openAiModel" {{#if
+                    errors.openAiModel}}is-invalid{{/if}}>
+                    {{#each openAiModels}}
+                    <option value="{{id}}" {{#if selected}}selected{{/if}}>{{name}}</option>
+                    {{/each}}
+                </select>
+                {{#if errors.openAiModel}}
+                <span class="invalid-feedback">{{errors.openAiModel}}</span>
+                {{/if}}
+                <small class="form-text text-muted">Select the model to use for analysis. Ensure your account can use
+                    the selected model, or analysis requests will fail.</small>
+            </div>
+
+            <div class="form-group">
+
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
+                        target="_blank">openAiAPIUrl</a>]
+                </div>
+
+                <label for="openAiAPIUrl">OpenAI API URL</label>
+                <input type="url" class="form-control {{#if errors.openAiAPIUrl}}is-invalid{{/if}}" id="openAiAPIUrl"
+                    name="openAiAPIUrl" value="{{values.openAiAPIUrl}}" placeholder="https://api.openai.com" />
+                {{#if errors.openAiAPIUrl}}
+                <span class="invalid-feedback">{{errors.openAiAPIUrl}}</span>
+                {{/if}}
+                <small class="form-text text-muted">OpenAI API URL. Leave blank to use the default.</small>
+            </div>
+
+        </div>
+    </div>
+
+    <div class="card mb-4" id="openai_settings">
+        <div class="card-header py-3">
+            <h6 class="m-0 font-weight-bold text-primary">Pre-processing settings</h6>
+        </div>
+        <div class="card-body">
+
+            {{#if errorLog}}
+            <ul class="nav nav-tabs mb-3" id="myTab" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <a class="nav-link active" id="fn-tab" data-toggle="tab" href="#fn" role="tab" aria-controls="fn"
+                        aria-selected="true">Filter function</a>
+                </li>
+
+                <li class="nav-item" role="presentation">
+                    <a class="nav-link" id="errors-tab" data-toggle="tab" href="#errors" role="tab"
+                        aria-controls="errors" aria-selected="false">Error log</a>
+                </li>
+            </ul>
+            {{/if}}
+
+            <div class="tab-content" id="myTabContent">
+                <div class="tab-pane show active" id="fn" role="tabpanel" aria-labelledby="fn-tab">
+
+                    <div class="form-group">
+                        <div class="text-muted float-right code-link">[<a
+                                href="https://emailengine.app/pre-processing-functions" target="_blank"
+                                referrerpolicy="{{referrerPolicy}}">documentation</a>]
+
+                            [<a href="/admin/iframe/docs#/Settings/postV1Settings" target="_blank"
+                                referrerpolicy="{{referrerPolicy}}">openAiPreProcessingFn</a>]
+                        </div>
+                        <label for="editor-fn">Filter function</label>
+                        <div style="line-height: 1; margin-bottom: 10px;">
+                            <small>JavaScript code to determine if the email should be processed by LLM. If the code
+                                evaluates
+                                to <code>true</code> then the email is sent to LLM for processing, otherwise it is
+                                skipped. The
+                                script includes <code>payload</code> as a global variable that contains the email
+                                data.</small>
+                        </div>
+                        <div id="editor-fn" class="code-editor"></div>
+                        <div class="editor-embed-block">
+                            <div class="editor-embed-content editor-embed-content-left">
+                                Filter function
+                            </div>
+                            <div class="editor-embed-content editor-embed-content-left editor-embed-content-right">
+                                <a href="#" class="toggle-fullscreen" data-target="editor-fn">Toggle fullscreen</a>
+                            </div>
+                            <div class="editor-embed-content editor-embed-content-left editor-embed-content-right">
+                                <a href="#" id="test-payload-btn">Set test payload</a>
+                            </div>
+
+                            <div class="editor-embed-content editor-embed-content-right editor-embed-content-left">
+                                Evaluation result:
+                                <span id="filter-res" class="evalres text-info">no match</span>
+                            </div>
+
+                            <div class="editor-embed-content editor-embed-content-right">
+                                {{> editor_scope_info}}
+                            </div>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+
+                <div class="tab-pane" id="errors" role="tabpanel" aria-labelledby="errors-tab">
+
+
+                    <p>The following errors were thrown when executing the pre-processing function. Only the most
+                        recent errors are shown.</p>
+
+                    <table class="table">
+
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th width="40%">Error</th>
+                                <th width="40%">Payload</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{#each errorLog}}
+
+                            <tr>
+
+                                <td>
+                                    <span class="relative-time" data-time="{{created}}"></span>
+                                </td>
+
+                                <td>
+                                    <textarea class="error-log-field" readonly>{{error}}</textarea>
+                                </td>
+
+                                <td>
+                                    <textarea class="error-log-field" readonly>{{json payload}}</textarea>
+                                </td>
+
+                            </tr>
+
+                            {{/each}}
+                        </tbody>
+
+                    </table>
+
+                </div>
+
+            </div>
+
+        </div>
+    </div>
+
+    <div id="prompt_settings" class="card mb-4">
+        <div class="card-header py-3 d-flex flex-row align-items-center justify-content-between">
+            <h6 class="m-0 font-weight-bold text-primary">Prompt settings</h6>
+            <div class="dropdown no-arrow">
+                <a class="dropdown-toggle" href="#" role="button" id="dropdownMenuLink" data-toggle="dropdown"
+                    aria-haspopup="true" aria-expanded="false">
+                    <i class="fas fa-ellipsis-v fa-sm fa-fw text-gray-400"></i>
+                </a>
+                <div class="dropdown-menu dropdown-menu-right shadow animated--fade-in"
+                    aria-labelledby="dropdownMenuLink">
+                    <div class="dropdown-header">Prompt actions:</div>
+                    <a class="dropdown-item" href="#" id="prompt-reset-btn">
+                        <i class="fas fa-arrow-circle-down fa-sm"></i> <span>Restore default prompt</span>
+                    </a>
+                </div>
+            </div>
+        </div>
+        <div class="card-body">
+
+            <div class="form-group">
+
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
+                        target="_blank">openAiPrompt</a>]</div>
+
+                <label>Prompt for LLM requests</label>
+
+                <input type="hidden" class="{{#if errors.openAiPromptElement}}is-invalid{{/if}}"
+                    id="openAiPromptElement" name="openAiPrompt" value="{{values.openAiPrompt}}">
+
+                <div id="editor-prompt" class="code-editor"></div>
+
+                <div class="editor-embed-block">
+                    <div class="editor-embed-content editor-embed-content-left">
+                        LLM prompt
+                    </div>
+                    <div class="editor-embed-content editor-embed-content-left editor-embed-content-right">
+                        <a href="#" class="toggle-fullscreen" data-target="editor-prompt">Toggle fullscreen</a>
+                    </div>
+                    <div class="editor-embed-content editor-embed-content-right">
+                        <a href="#" id="prompt-try-btn">Test this prompt</a>
+                    </div>
+                </div>
+
+                {{#if errors.openAiPrompt}}
+                <span class="invalid-feedback">{{errors.openAiPrompt}}</span>
+                {{/if}}
+
+                <small class="form-text text-muted">Edit the prompt that is sent to LLM for each email. EmailEngine asks
+                    for the response to be in JSON, so your prompt must describe the JSON properties to return.
+                </small>
+            </div>
+
+            <div class="form-group">
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
+                        target="_blank">openAiTemperature</a>]
+                </div>
+                <label for="settingsOpenAiTemperature">Temperature</label>
+                <input type="number" class="form-control text-list {{#if errors.openAiTemperature}}is-invalid{{/if}}"
+                    id="settingsOpenAiTemperature" step="0.001" min="0" max="2" name="openAiTemperature"
+                    value="{{values.openAiTemperature}}" />
+                {{#if errors.openAiTemperature}}
+                <span class="invalid-feedback">{{errors.openAiTemperature}}</span>
+                {{/if}}
+                <small class="form-text text-muted"><a
+                        href="https://platform.openai.com/docs/api-reference/chat/create#temperature" target="_blank"
+                        referrerpolicy="{{referrerPolicy}}">Temperature</a> value in the range of 0 to 2. Leave empty
+                    for
+                    default.</small>
+            </div>
+
+            <div class="form-group">
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
+                        target="_blank">openAiTopP</a>]
+                </div>
+                <label for="settingsOpenAiTopP">Top-p sampling</label>
+                <input type="number" class="form-control text-list {{#if errors.openAiTopP}}is-invalid{{/if}}"
+                    id="settingsOpenAiTopP" step="0.001" min="0" max="1" name="openAiTopP"
+                    value="{{values.openAiTopP}}" />
+                {{#if errors.openAiTopP}}
+                <span class="invalid-feedback">{{errors.openAiTopP}}</span>
+                {{/if}}
+                <small class="form-text text-muted"><a
+                        href="https://platform.openai.com/docs/api-reference/chat/create#top_p" target="_blank"
+                        referrerpolicy="{{referrerPolicy}}">Top_p</a> value in the range of 0 to 1. Leave empty for
+                    default.</small>
+            </div>
+
+        </div>
+    </div>
+
+    <div class="mb-4">
+        <button type="submit" class="btn btn-primary btn-icon-split">
+            <span class="icon text-white-50">
+                <i class="fas fa-cog"></i>
+            </span>
+            <span class="text">Update settings</span>
+        </button>
+    </div>
+
+</form>
+
+<div class="modal fade" id="testPromptModal" tabindex="-1" aria-labelledby="testPromptModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="testPromptModalLabel">LLM Prompt Tester</h5>
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <p>
+                    Select an EML-formatted email file from the disk to send to the OpenAI API for inspection.
+                </p>
+
+                <div id="testPromptError" class="d-none">
+                    <div class="alert alert-danger"></div>
+                </div>
+                <div id="testPromptResponse" class="d-none">
+                    <pre class="content"
+                        style="max-height: 350px; border: 1px solid #d1d3e2; border-radius: .35rem; padding: 5px; color: #6e707e;"></pre>
+                </div>
+
+            </div>
+            <div class="modal-footer">
+
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+                <button type="button" id="prompt-test-btn" class="btn btn-primary btn-icon-split">
+
+                    <span class="icon text-white-50">
+                        <i class="fas fa-flask"></i>
+                    </span>
+                    <span class="text">Select and Analyze email&#x2026;</span>
+
+                </button>
+
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="setPayloadModal" tabindex="-1" aria-labelledby="setPayloadModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="setPayloadModalLabel">Set test payload</h5>
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+
+                <div>JSON payload</div>
+                <div id="editor-json" class="code-editor" style="height: 10rem;"></div>
+                <small id="inputToHelp" class="form-text text-muted">Enter the JSON strcture that will be
+                    used as the <code>payload</code> value for test evaluation.</small>
+
+            </div>
+            <div class="modal-footer" style="justify-content: space-between">
+                <div>
+                    <select class="custom-select custom-select-sm" id="select-predefined-payload">
+                        <option> -- Select predefined payload -- </option>
+                    </select>
+                </div>
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="/static/js/ace/ace.js"></script>
+
+<input type="hidden" id="examplePayloadsJson" value="{{examplePayloadsJson}}">
+<input type="hidden" id="scriptEnvJson" value="{{scriptEnvJson}}">
+<input type="hidden" id="defaultPromptJson" value="{{defaultPromptJson}}">
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+
+        let scriptEnv = JSON.parse(document.getElementById('scriptEnvJson').value);
+        const evaluationWorker = new Worker('/static/js/evaluation-worker.js');
+
+        const editors = new Map();
+
+        const editorFn = ace.edit("editor-fn", {
+            enableBasicAutocompletion: true,
+            enableSnippets: true,
+            enableLiveAutocompletion: true,
+            useWorker: false
+        });
+        editors.set("editor-fn", editorFn);
+
+        editorFn.setTheme("ace/theme/xcode");
+        editorFn.session.setMode("ace/mode/javascript");
+        editorFn.setValue(JSON.parse(document.getElementById('fn-content-element').value));
+
+        editorFn.session.on('changeMode', function (e, session) {
+            if ("ace/mode/javascript" === session.getMode().$id) {
+                if (!!session.$worker) {
+                    session.$worker.send("setOptions", [JSHINT_OPTS]);
+                }
+            }
+        });
+
+        const editorPrompt = ace.edit("editor-prompt", {
+            enableBasicAutocompletion: true,
+            enableSnippets: false,
+            enableLiveAutocompletion: false,
+            useWorker: true
+        });
+        editors.set("editor-prompt", editorPrompt);
+
+        editorPrompt.setTheme("ace/theme/xcode");
+        editorPrompt.session.setMode("ace/mode/markdown");
+        editorPrompt.session.setValue(document.getElementById('openAiPromptElement').value);
+
+        document.getElementById('settings-form').addEventListener('submit', () => {
+            document.getElementById('fn-content-element').value = JSON.stringify(editorFn.getValue());
+            document.getElementById('openAiPromptElement').value = editorPrompt.getValue();
+        });
+
+        for (let toggleElm of document.querySelectorAll('.toggle-fullscreen')) {
+            let target = toggleElm.dataset.target;
+            if (!editors.has(target)) {
+                continue
+            }
+            let targetElm = document.getElementById(target);
+            let editor = editors.get(target)
+
+            toggleElm.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                targetElm.classList.toggle('full-screen-div');
+                editor.resize();
+                editor.focus();
+            });
+
+            targetElm.addEventListener('keydown', e => {
+                if (e.key === 'Escape' && targetElm.classList.contains('full-screen-div')) {
+                    targetElm.classList.remove('full-screen-div')
+                    editor.resize();
+                    editor.focus();
+                }
+            });
+        }
+
+        document.getElementById('prompt-try-btn').addEventListener('click', e => {
+            e.preventDefault()
+            $('#testPromptModal').modal('show');
+        })
+
+        const testPayload = { content: { account: 'test', path: 'INBOX', subject: 'test email' }, error: null };
+
+        const updateFilterResult = (err, result, opts) => {
+            let resultElm = document.getElementById('filter-res');
+            if (err) {
+                resultElm.classList.remove('text-warning', 'text-success');
+                resultElm.classList.add('text-danger');
+                resultElm.textContent = `validation failed (${err.message})`
+                return;
+            }
+
+            if (result) {
+                resultElm.classList.remove('text-warning', 'text-danger');
+                resultElm.classList.add('text-success');
+                resultElm.textContent = `filter matches`
+            } else {
+                resultElm.classList.remove('text-success', 'text-danger');
+                resultElm.classList.add('text-warning');
+
+                let truthyWarning = opts && opts.truthyWarning;
+                resultElm.textContent = `no match${truthyWarning ? ` (function must return \`true\`, but returned a ${typeof truthyWarning} value)` : ''} `
+            }
+        }
+
+        const updateExampleResult = () => {
+            const filterVal = editorFn.getValue();
+
+            let filtered;
+            let mapping;
+
+            try {
+                if (testPayload.error) {
+                    throw testPayload.error;
+                }
+                evaluationWorker.postMessage({
+                    type: 'filter', code: filterVal, payload: testPayload.content, env: scriptEnv
+                });
+            } catch (err) {
+                updateFilterResult(err);
+            }
+        }
+
+        let testPromptBtn = document.getElementById('prompt-test-btn');
+
+        let showError = message => {
+            document.getElementById('testPromptError').classList.remove('d-none');
+            document.getElementById('testPromptResponse').classList.add('d-none');
+
+            document.querySelector('#testPromptError .alert').textContent = message;
+        }
+
+        let showResponse = value => {
+            document.getElementById('testPromptError').classList.add('d-none');
+            document.getElementById('testPromptResponse').classList.remove('d-none');
+
+            document.querySelector('#testPromptResponse .content').textContent = value;
+        }
+
+        let clearResponses = () => {
+            document.getElementById('testPromptError').classList.add('d-none');
+            document.getElementById('testPromptResponse').classList.add('d-none');
+        }
+
+        async function testPromptFn() {
+            let emailFile;
+
+            clearResponses();
+
+            try {
+                emailFile = await browseFileContents('base64');
+            } catch (err) {
+                return showError(err.message)
+            }
+
+            let payload = {
+                emailFile,
+                openAiPrompt: editorPrompt.getValue(),
+                openAiModel: document.getElementById('settingsServiceOpenAiModel').value,
+                openAiAPIUrl: document.getElementById('openAiAPIUrl').value,
+                openAiAPIKey: document.getElementById('openAiAPIKey').value,
+                openAiTemperature: document.getElementById('settingsOpenAiTemperature').value,
+                openAiTopP: document.getElementById('settingsOpenAiTopP').value
+            };
+
+            let res;
+            try {
+                res = await fetch('/admin/config/ai/test-prompt', {
+                    method: 'post',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({
+                        crumb: document.getElementById('crumb').value,
+                        ...payload
+                    })
+                });
+            } catch (err) {
+                return showError(err.message)
+            }
+
+            if (!res.ok) {
+                return showError(`HTTP error! status: ${res.status}`)
+            }
+
+            const data = await res.json();
+            if (!data.success) {
+                return showError(data.error || 'Request failed')
+            }
+
+            showResponse(JSON.stringify(data.response, false, 2));
+        }
+
+        let iconElm = document.querySelector('#prompt-test-btn i');
+        let toggleSpinner = (enabled) => {
+            if (enabled) {
+                iconElm.classList.remove('fa-spinner', 'fa-spin');
+                iconElm.classList.add('fa-flask');
+                testPromptBtn.disabled = false;
+            } else {
+                iconElm.classList.remove('fa-flask');
+                iconElm.classList.add('fa-spinner', 'fa-spin');
+                testPromptBtn.disabled = true;
+            }
+        }
+
+        document.getElementById('prompt-reset-btn').addEventListener('click', e => {
+            e.preventDefault()
+
+            editorPrompt.setValue(JSON.parse(document.getElementById('defaultPromptJson').value).prompt);
+        });
+
+        let runFileTest = () => {
+            toggleSpinner(false)
+            testPromptFn().then(() => { }).catch(err = {}).finally(() => {
+                toggleSpinner(true)
+            });
+        }
+
+        testPromptBtn.addEventListener('click', e => {
+            e.preventDefault();
+            runFileTest();
+        });
+
+
+        evaluationWorker.onmessage = e => {
+            const { type, result, error } = e && e.data || {};
+
+            switch (type) {
+                case 'filter':
+                    if (!error) {
+                        updateFilterResult(null, result === true, { truthyWarning: result && result !== true ? result : false });
+                    } else {
+                        updateFilterResult(new Error(error));
+                    }
+                    break;
+
+                case 'log': {
+                    console.log(`[Worker Log] ${result.level.toUpperCase()}`, result.msg);
+                    break;
+                }
+            }
+        }
+
+        let validateTimer = false;
+        editorFn.session.on('change', function () {
+            clearTimeout(validateTimer);
+            validateTimer = setTimeout(updateExampleResult, 100);
+        });
+        editorFn.clearSelection(1);
+
+        updateExampleResult();
+
+
+        const testPayloadBtn = document.getElementById('test-payload-btn');
+        testPayloadBtn.addEventListener('click', e => {
+            e.preventDefault();
+            $('#setPayloadModal').modal('show');
+        });
+
+        const editorJson = ace.edit("editor-json");
+        editorJson.setTheme("ace/theme/xcode");
+        editorJson.session.setMode("ace/mode/json");
+        editorJson.session.setValue(JSON.stringify(testPayload.content, false, 4));
+
+        editorJson.session.on('change', function (delta) {
+            // delta.start, delta.end, delta.lines, delta.action
+            let curval = editorJson.getValue().trim();
+            try {
+                if (curval) {
+                    let parsed = JSON.parse(curval);
+                    if (parsed && typeof parsed !== 'object') {
+                        throw new Error('Not an object')
+                    }
+                    testPayload.content = parsed;
+                }
+                testPayload.error = null;
+                clearTimeout(validateTimer);
+                validateTimer = setTimeout(updateExampleResult, 10);
+            } catch (err) {
+                console.error(err);
+                testPayload.error = err;
+                clearTimeout(validateTimer);
+                validateTimer = setTimeout(updateExampleResult, 10);
+            }
+        });
+
+        let examplePayloads = JSON.parse(document.getElementById('examplePayloadsJson').value || '[]');
+        const payloadSelectElm = document.getElementById('select-predefined-payload');
+
+        try {
+            if (examplePayloads && Array.isArray(examplePayloads)) {
+
+                examplePayloads.forEach(example => {
+                    let optionElm = document.createElement('option');
+                    optionElm.textContent = example.name;
+                    optionElm.dataset.exampleKey = example.key
+                    payloadSelectElm.appendChild(optionElm)
+                });
+            }
+        } catch (err) {
+            console.error(err)
+        }
+
+        payloadSelectElm.addEventListener('change', e => {
+            if (!payloadSelectElm.selectedIndex) {
+                return
+            }
+            let key = payloadSelectElm.options[payloadSelectElm.selectedIndex].dataset.exampleKey;
+            if (key) {
+                let example = examplePayloads.find(data => data.key === key);
+                if (example) {
+                    editorJson.session.setValue(JSON.stringify(example.content, false, 4))
+                }
+            }
+            payloadSelectElm.selectedIndex = 0;
+        });
+
+        function redrawModelList(models) {
+            let selectElm = document.getElementById('settingsServiceOpenAiModel');
+            let selected = selectElm.value;
+
+            selectElm.innerHTML = '';
+
+            for (let model of models) {
+                let elm = document.createElement('option');
+                elm.setAttribute('value', model.id);
+                elm.textContent = model.name;
+                if (model.id === selected) {
+                    elm.selected = true
+                }
+                selectElm.appendChild(elm);
+            }
+        }
+
+        let reloadBtn = document.getElementById('reload-btn');
+        let reloadBtnIcon = document.querySelector('#reload-btn i');
+
+        const requestReload = async () => {
+            const res = await fetch('/admin/config/ai/reload-models', {
+                method: 'post',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    crumb: document.getElementById('crumb').value,
+                    openAiAPIUrl: document.getElementById('openAiAPIUrl').value,
+                    openAiAPIKey: document.getElementById('openAiAPIKey').value,
+                })
+            });
+            if (!res.ok) {
+                throw new Error(`HTTP error! status: ${res.status}`);
+            }
+            const data = await res.json();
+
+            return data;
+        }
+
+        let loading = false;
+        let reloadAddresses = () => {
+            if (loading) {
+                return
+            }
+            loading = true
+            reloadBtnIcon.classList.add('fa-spin');
+            reloadBtn.disabled = true;
+
+            requestReload().then(data => {
+                loading = false
+                reloadBtnIcon.classList.remove('fa-spin');
+                reloadBtn.disabled = false;
+                if (data.error) {
+                    showToast('Failed to send payload', 'alert-triangle')
+                    return;
+                }
+
+                if (data.models) {
+                    redrawModelList(data.models);
+                }
+
+            }).catch(err => {
+                loading = false
+                reloadBtnIcon.classList.remove('fa-spin');
+                reloadBtn.disabled = false;
+                showToast('Request failed\n' + err.message, 'alert-triangle');
+            });
+        }
+
+        reloadBtn.addEventListener('click', reloadAddresses);
+    });
+
+
+</script>

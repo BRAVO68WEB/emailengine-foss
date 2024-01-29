@@ -33,7 +33,12 @@
         {{/if}}
 
         {{#if webhook.webhookErrorFlag.message}}
-        <div class="mt-3 mb-3 alert alert-danger">
+        <div class="mt-3 mb-3 alert clear-alert-btn alert-danger" data-clear-alert="webhook-route"
+            data-clear-entry="{{webhook.id}}">
+            <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                <span aria-hidden="true">&times;</span>
+            </button>
+
             <p><strong>NB!</strong> The last attempted webhook failed with the response below.</p>
             <hr>
             <p class="mb-0">
@@ -201,14 +206,22 @@
 
 <script>
     document.addEventListener('DOMContentLoaded', () => {
+
+        const JSHINT_OPTS = {
+            esversion: 11,
+            module: true,
+            globals: ['payload', 'URL', 'logger', 'fetch']
+        }
+
         const editorFn = ace.edit("fn-preview", {
-            showGutter: true
+            showGutter: true,
+            useWorker: false
         });
 
         const editorMap = ace.edit("map-preview", {
-            showGutter: true
+            showGutter: true,
+            useWorker: false
         });
-
 
         editorFn.setReadOnly(true);
         editorFn.setShowPrintMargin(false);
@@ -227,9 +240,7 @@
         editorFn.session.on('changeMode', function (e, session) {
             if ("ace/mode/javascript" === session.getMode().$id) {
                 if (!!session.$worker) {
-                    session.$worker.send("setOptions", [{
-                        esversion: 11
-                    }]);
+                    session.$worker.send("setOptions", [JSHINT_OPTS]);
                 }
             }
         });
@@ -237,9 +248,7 @@
         editorMap.session.on('changeMode', function (e, session) {
             if ("ace/mode/javascript" === session.getMode().$id) {
                 if (!!session.$worker) {
-                    session.$worker.send("setOptions", [{
-                        esversion: 11
-                    }]);
+                    session.$worker.send("setOptions", [JSHINT_OPTS]);
                 }
             }
         });

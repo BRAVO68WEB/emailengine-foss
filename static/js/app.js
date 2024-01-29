@@ -24,6 +24,72 @@ window.showToast = (message, icon) => {
     $(toast).toast('show');
 };
 
+window.browseFileContents = function (type) {
+    let iElm = document.createElement('input');
+    iElm.setAttribute('type', 'file');
+    iElm.style.width = '1px';
+    iElm.style.height = '1px';
+    iElm.style.position = 'absolute';
+    iElm.style.left = '-1000px';
+    iElm.style.top = '-1000px';
+    document.body.appendChild(iElm);
+
+    return new Promise((resolve, reject) => {
+        iElm.addEventListener('change', () => {
+            const reader = new FileReader();
+
+            reader.addEventListener('load', event => {
+                let fileContents = event.target.result;
+                document.body.removeChild(iElm);
+
+                switch (type) {
+                    case 'base64': {
+                        // extract base64 content from a Data URI
+                        fileContents = fileContents.substring(event.target.result.indexOf(',') + 1);
+                        break;
+                    }
+                    case 'arrayBuffer':
+                    case 'text':
+                    default:
+                    // do nothing
+                }
+
+                resolve(fileContents);
+            });
+
+            reader.addEventListener('error', err => {
+                console.error(err);
+                document.body.removeChild(iElm);
+                reject(new Error('Failed loading file'));
+            });
+
+            reader.addEventListener('abort', () => {
+                document.body.removeChild(iElm);
+                reject(new Error('Failed loading file'));
+            });
+
+            if (!iElm.files || !iElm.files[0]) {
+                document.body.removeChild(iElm);
+                return resolve(null);
+            }
+
+            switch (type) {
+                case 'base64':
+                    reader.readAsDataURL(iElm.files[0]);
+                    break;
+                case 'arrayBuffer':
+                    reader.readAsArrayBuffer(iElm.files[0]);
+                    break;
+                case 'text':
+                default:
+                    reader.readAsText(iElm.files[0], 'UTF-8');
+            }
+        });
+
+        iElm.click();
+    });
+};
+
 document.addEventListener('DOMContentLoaded', () => {
     let toggleAllElements = (allElementsElm, otherElements, direction) => {
         if (!allElementsElm || !otherElements) {
@@ -392,7 +458,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({
                     crumb: document.getElementById('crumb').value,
-                    alert: $(this).data('clearAlert') // eslint-disable-line no-invalid-this
+                    alert: $(this).data('clearAlert'), // eslint-disable-line no-invalid-this
+                    entry: $(this).data('clearEntry') || '' // eslint-disable-line no-invalid-this
                 })
             }).catch(err => console.error(err));
         });

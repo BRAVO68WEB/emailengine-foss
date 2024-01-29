@@ -439,6 +439,19 @@ class ConnectionHandler {
         return await accountData.connection.uploadMessage(message.data);
     }
 
+    async getQuota(message) {
+        if (!this.accounts.has(message.account)) {
+            return NO_ACTIVE_HANDLER_RESP;
+        }
+
+        let accountData = this.accounts.get(message.account);
+        if (!accountData.connection) {
+            return NO_ACTIVE_HANDLER_RESP;
+        }
+
+        return await accountData.connection.getQuota();
+    }
+
     async createMailbox(message) {
         if (!this.accounts.has(message.account)) {
             return NO_ACTIVE_HANDLER_RESP;
@@ -525,7 +538,11 @@ class ConnectionHandler {
         }
 
         setImmediate(() => {
-            source.pipe(stream);
+            if (Buffer.isBuffer(source.data)) {
+                stream.end(source.data);
+            } else {
+                source.pipe(stream);
+            }
         });
 
         return {
@@ -547,7 +564,7 @@ class ConnectionHandler {
             }
         });
 
-        process.exit(0);
+        logger.flush(() => process.exit());
     }
 
     // some general message
@@ -607,6 +624,7 @@ class ConnectionHandler {
             case 'deleteMessage':
             case 'deleteMessages':
             case 'getRawMessage':
+            case 'getQuota':
             case 'createMailbox':
             case 'renameMailbox':
             case 'deleteMailbox':
@@ -737,18 +755,18 @@ parentPort.on('message', message => {
 process.on('SIGTERM', () => {
     connectionHandler.kill().catch(err => {
         logger.error({ msg: 'Execution failed', err });
-        process.exit(4);
+        logger.flush(() => process.exit(4));
     });
 });
 
 process.on('SIGINT', () => {
     connectionHandler.kill().catch(err => {
         logger.error({ msg: 'Execution failed', err });
-        process.exit(5);
+        logger.flush(() => process.exit(5));
     });
 });
 
 main().catch(err => {
-    logger.error({ msg: 'Execution failed', err });
-    setImmediate(() => process.exit(6));
+    logger.fatal({ msg: 'Execution failed', err });
+    logger.flush(() => process.exit(6));
 });
