@@ -5,6 +5,44 @@
     </div>
 
 
+    {{#if isElastiCache}}
+    <div class="card border-left-danger mt-4">
+        <div class="card-body">
+            <div class="row no-gutters align-items-center">
+                <div class="col mr-2">
+                    <div class="text-xs font-weight-bold text-danger text-uppercase mb-1">Compatiblity warning
+                    </div>
+                    <p>EmailEngine is incompatible with Amazon ElastiCache as the database backend.</p>
+                    <p>Please switch to a standard Redis instance. Using ElastiCache with EmailEngine can result in data
+                        loss and several functionalities may not work.</p>
+                </div>
+                <div class="col-auto">
+                    <i class="fas fa-exclamation-circle fa-2x text-gray-300"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    {{/if}}
+
+
+    {{#if isRedisCluster}}
+    <div class="card border-left-danger mt-4">
+        <div class="card-body">
+            <div class="row no-gutters align-items-center">
+                <div class="col mr-2">
+                    <div class="text-xs font-weight-bold text-danger text-uppercase mb-1">Compatiblity warning
+                    </div>
+                    <p>EmailEngine is incompatible with Redis Cluster setup.</p>
+                    <p>Please switch to a standard Redis primary instance.</p>
+                </div>
+                <div class="col-auto">
+                    <i class="fas fa-exclamation-circle fa-2x text-gray-300"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    {{/if}}
+
 
     {{#unless hasAccounts}}
 
@@ -12,7 +50,7 @@
         <div class="card-body">
             <div class="row no-gutters align-items-center">
                 <div class="col mr-2">
-                    <div class="text-xs font-weight-bold text-danger text-uppercase mb-1">Welcome to EmailEngine!
+                    <div class="text-xs font-weight-bold text-success text-uppercase mb-1">Welcome to EmailEngine!
                     </div>
                     <p>To start using EmailEngine, add an email account to the <a href="/admin/accounts">account
                             registry</a>. Once registered, you can access this account to send
@@ -211,6 +249,27 @@
         </div>
         {{/if}}
 
+        <div class="col-xl-3 col-md-6 mb-4">
+            <div class="card border-left-{{redisPing.color}} shadow">
+                <div class="card-body">
+                    <div class="row no-gutters align-items-center">
+                        <div class="col mr-2">
+                            <div class="text-xs font-weight-bold text-gray-800 text-uppercase mb-1" {{#if
+                                redisPing.comment}}title="{{redisPing.comment}}" data-toggle="tooltip"
+                                data-placement="top" {{/if}} style="cursor: default;">
+                                {{redisPing.title}}</div>
+                            <div class="h5 mb-0 font-weight-bold text-gray-800">
+                                {{redisPing.value}}
+                            </div>
+                        </div>
+                        <div class="col-auto">
+                            <i class="fas fa-{{redisPing.icon}} fa-2x text-gray-300"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
     </div>
 
 
@@ -246,38 +305,5 @@
 </div>
 
 <input type="hidden" name="crumb" id="crumb" value="{{crumb}}" />
-<script>
-    document.addEventListener('DOMContentLoaded', () => {
-        let sendBrowserInfo = async () => {
-            let timezone = false;
-            try {
-                timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-            } catch (err) {
-                console.error(err);
-            }
-
-            try {
-                const res = await fetch('/admin/config/browser', {
-                    method: 'post',
-                    headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify({
-                        crumb: document.getElementById('crumb').value,
-                        serviceUrl: window.location.origin || false,
-                        timezone: timezone || false,
-                        language: navigator.language || false
-                    })
-                });
-                if (!res.ok) {
-                    console.error('Failed to post browser info');
-                }
-            } catch (err) {
-                console.error(err);
-            }
-
-        }
-
-        sendBrowserInfo().catch(err => console.error(err))
-    });
-</script>
 
 {{>add_account_modal}}

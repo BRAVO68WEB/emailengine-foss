@@ -6,7 +6,7 @@ const packageData = require('../package.json');
 const config = require('wild-config');
 const logger = require('../lib/logger');
 
-const { getDuration, emitChangeEvent, readEnvValue, matchIp, threadStats } = require('../lib/tools');
+const { getDuration, emitChangeEvent, readEnvValue, matchIp, threadStats, loadTlsConfig } = require('../lib/tools');
 
 const Bugsnag = require('@bugsnag/js');
 if (readEnvValue('BUGSNAG_API_KEY')) {
@@ -407,6 +407,8 @@ async function init() {
         serverOptions.secure = true;
         serverOptions.allowInsecureAuth = false;
 
+        loadTlsConfig(serverOptions, 'EENGINE_SMTP_TLS_');
+
         // load certificates
         let serviceUrl = await settings.get('serviceUrl');
         let hostname = (new URL(serviceUrl).hostname || '').toString().toLowerCase().trim();
@@ -518,5 +520,5 @@ init()
     })
     .catch(err => {
         logger.error({ msg: 'Failed to initialize SMTP', err });
-        setImmediate(() => process.exit(3));
+        logger.flush(() => process.exit(3));
     });

@@ -18,7 +18,7 @@
         <div class="card-body">
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
                         target="_blank">serviceUrl</a>]</div>
 
                 <label for="settingsServiceUrl">Service URL</label>
@@ -32,7 +32,7 @@
             </div>
 
             <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
                         target="_blank">enableApiProxy</a>]</div>
 
                 <input type="checkbox" class="form-check-input {{#if errors.enableApiProxy}}is-invalid{{/if}}"
@@ -47,7 +47,7 @@
             </div>
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
                         target="_blank">locale</a>]</div>
 
                 <label for="settingsServiceLocale">Default language</label>
@@ -73,7 +73,7 @@
             </div>
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
                         target="_blank">timezone</a>]</div>
 
                 <label for="settingsServiceTimezone">Default timezone</label>
@@ -97,7 +97,7 @@
         <div class="card-body">
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
                         target="_blank">serviceSecret</a>]</div>
 
                 <label for="settingsServiceSecret">Service secret</label>
@@ -178,6 +178,29 @@
                         endpoint</a>. Access to OAuth2 tokens is disabled by default due to the security risk of
                     potentially leaking these tokens.</small>
             </div>
+
+
+            <div class="form-group form-check">
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
+                        target="_blank">ignoreMailCertErrors</a>]</div>
+
+                <input type="checkbox" class="form-check-input {{#if errors.ignoreMailCertErrors}}is-invalid{{/if}}"
+                    id="ignoreMailCertErrors" name="ignoreMailCertErrors" {{#if
+                    values.ignoreMailCertErrors}}checked{{/if}} />
+                <label class="form-check-label" for="ignoreMailCertErrors">Allow insecure certificates for
+                    IMAP/SMTP
+
+                    <span class="badge badge-{{#if values.ignoreMailCertErrors}}danger{{else}}success{{/if}}">{{#if
+                        values.ignoreMailCertErrors}}enabled{{else}}disabled{{/if}}</span>
+
+                </label>
+                {{#if errors.ignoreMailCertErrors}}
+                <span class="invalid-feedback">{{errors.ignoreMailCertErrors}}</span>
+                {{/if}}
+                <small class="form-text text-muted">Enabling this will permit EmailEngine to bypass security warnings
+                    related to self-signed or expired TLS certificates during IMAP and SMTP interactions.</small>
+            </div>
+
         </div>
     </div>
 
@@ -202,7 +225,7 @@
         <div class="card-body">
             <div class="form-group">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
                         target="_blank">queueKeep</a>]</div>
 
                 <label for="settingsQueueKeep">How many completed/failed queue entries to keep</label>
@@ -227,7 +250,7 @@
         <div class="card-body">
             <div class="form-group">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
                         target="_blank">deliveryAttempts</a>]</div>
 
                 <label for="settingsDeliveryAttempts">How many times to retry a failed email sending</label>
@@ -256,7 +279,7 @@
                     aria-labelledby="dropdownMenuLink">
                     <div class="dropdown-header">Template actions:</div>
                     <a class="dropdown-item" href="#" id="preview-header-btn">
-                        <i class="fas fa-eye fa-sm clean-icon"></i> <span>Preview</span>
+                        <i class="fas fa-eye fa-sm"></i> <span>Preview</span>
                     </a>
                 </div>
             </div>
@@ -265,13 +288,23 @@
 
             <div class="form-group">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
                         target="_blank">templateHeader</a>]</div>
 
                 <label>Template header for public pages (HTML code)</label>
 
-                <input type="hidden" id="templateHeaderElement" name="templateHeader" value="{{values.templateHeader}}">
-                <div id="editor-html" class="code-editor" style="height: 10rem;"></div>
+                <input type="hidden" class="{{#if errors.templateHeaderElement}}is-invalid{{/if}}"
+                    id="templateHeaderElement" name="templateHeader" value="{{values.templateHeader}}">
+
+                <div id="editor-html" class="code-editor"></div>
+                <div class="editor-embed-block">
+                    <div class="editor-embed-content editor-embed-content-left">
+                        HTML content
+                    </div>
+                    <div class="editor-embed-content editor-embed-content-right">
+                        <a href="#" class="toggle-fullscreen" data-target="editor-html">Toggle fullscreen</a>
+                    </div>
+                </div>
 
                 {{#if errors.templateHeader}}
                 <span class="invalid-feedback">{{errors.templateHeader}}</span>
@@ -286,6 +319,47 @@
         </div>
     </div>
 
+    <div id="templates_settings" class="card mb-4">
+        <div class="card-header py-3">
+            <h6 class="m-0 font-weight-bold text-primary">Pre-processing scripts</h6>
+        </div>
+        <div class="card-body">
+
+
+            <p>The following options apply for pre-processing scripts like the filter and map function of the webhook
+                routes and document store settings.</p>
+
+            <div class="form-group">
+
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
+                        target="_blank">scriptEnv</a>]</div>
+
+                <label>Environment variable (JSON object)</label>
+
+                <input type="hidden" class="{{#if errors.scriptEnv}}is-invalid{{/if}}" id="scriptEnvElement"
+                    name="scriptEnv" value="{{values.scriptEnv}}">
+
+                <div id="editor-env" class="code-editor"></div>
+                <div class="editor-embed-block">
+                    <div class="editor-embed-content editor-embed-content-left">
+                        JSON content
+                    </div>
+                    <div class="editor-embed-content editor-embed-content-right">
+                        <a href="#" class="toggle-fullscreen" data-target="editor-env">Toggle fullscreen</a>
+                    </div>
+                </div>
+
+                {{#if errors.scriptEnv}}
+                <span class="invalid-feedback">{{errors.scriptEnv}}</span>
+                {{/if}}
+
+                <small class="form-text text-muted">You can set here a JSON object that is used as the value of
+                    <code>env</code> variable in all pre-processing scripts.</small>
+            </div>
+
+        </div>
+    </div>
+
     <div class="card mb-4" id="labs">
         <div class="card-header py-3">
             <h6 class="m-0 font-weight-bold text-primary">Labs <span class="badge badge-dark">beta</span></h6>
@@ -295,7 +369,7 @@
             <p>The following options are not well tested and might change in the futurue. Use these with care.</p>
 
             <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
                         target="_blank">trackSentMessages</a>]</div>
 
                 <input type="checkbox" class="form-check-input {{#if errors.trackSentMessages}}is-invalid{{/if}}"
@@ -313,7 +387,7 @@
             </div>
 
             <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
+                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
                         target="_blank">resolveGmailCategories</a>]</div>
 
                 <input type="checkbox" class="form-check-input {{#if errors.resolveGmailCategories}}is-invalid{{/if}}"
@@ -327,87 +401,6 @@
                     the Gmail tab) for incoming emails. Possible category values are the following: <em>social</em>,
                     <em>promotions</em>, <em>updates</em>, <em>forums</em>, and <em>primary</em>. You can find the value
                     in the <em>category</em> property of the <em>messageNew</em> webhook payload.</small>
-            </div>
-
-        </div>
-    </div>
-
-    <div class="card mb-4" id="openai_settings">
-        <div class="card-header py-3">
-            <h6 class="m-0 font-weight-bold text-primary">OpenAI <span class="badge badge-dark">beta</span></h6>
-        </div>
-        <div class="card-body">
-
-            {{#if openAiError}}
-            <div class="mt-3 mb-3 alert alert-danger clear-alert-btn" data-clear-alert="open-ai">
-                <button type="button" class="close" data-dismiss="alert" aria-label="Close">
-                    <span aria-hidden="true">&times;</span>
-                </button>
-
-                <p><strong>NB!</strong> The last attempted OpenAI request failed with the response below.</p>
-                <hr>
-                <p class="mb-0">
-                    <code>{{openAiError.message}}{{#if openAiError.code}} ({{openAiError.code}}){{/if}}</code>
-                </p>
-            </div>
-            {{/if}}
-
-            <p>The following options are not well tested and might change in the futurue. Use these with care.</p>
-
-            <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
-                        target="_blank">openAiModel</a>]</div>
-
-                <label for="settingsServiceOpenAiModel">OpenAI Model</label>
-                <select id="settingsServiceOpenAiModel" class="custom-select custom-select-sm" name="openAiModel" {{#if
-                    errors.openAiModel}}is-invalid{{/if}}>
-                    {{#each openAiModels}}
-                    <option value="{{key}}" {{#if selected}}selected{{/if}}>{{name}}</option>
-                    {{/each}}
-                </select>
-                {{#if errors.openAiModel}}
-                <span class="invalid-feedback">{{errors.openAiModel}}</span>
-                {{/if}}
-                <small class="form-text text-muted">Select the model to use for analysis. Ensure your account can use
-                    the selected model, or analysis requests will fail.</small>
-            </div>
-
-            <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
-                        target="_blank">generateEmailSummary</a>]</div>
-
-                <input type="checkbox" class="form-check-input {{#if errors.generateEmailSummary}}is-invalid{{/if}}"
-                    id="generateEmailSummary" name="generateEmailSummary" {{#if
-                    values.generateEmailSummary}}checked{{/if}} />
-                <label class="form-check-label" for="generateEmailSummary">Analyze email content with OpenAI</label>
-                {{#if errors.generateEmailSummary}}
-                <span class="invalid-feedback">{{errors.generateEmailSummary}}</span>
-                {{/if}}
-                <small class="form-text text-muted">EmailEngine will use OpenAI ChatGPT <a
-                        href="https://docs.emailengine.app/generating-summaries-of-new-emails-using-chatgpt/"
-                        target="_blank" referrerpolicy="{{referrerPolicy}}">to generate</a> a summary, a sentiment
-                    assessment and a security assessment for incoming emails if this option is enabled. Requires
-                    a valid OpenAI API key, preferrably for GPT-4.</small>
-            </div>
-
-            <div class="form-group">
-
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/settings/postV1Settings"
-                        target="_blank">openAiAPIKey</a>]
-                </div>
-
-                <label for="openAiAPIKey">OpenAI API key <a href="#" tabindex="-1" role="button" data-toggle="popover"
-                        data-trigger="hover" style="dispaly: inline-block;" data-title="PII alert"
-                        data-content="EmailEngine uploads the text content of incoming emails to the servers of ChatGPT. ChatGPT does not use this content for training, but you need to verify if this behavior is in accordance with your data processing agreements with your users."><i
-                            class="fas fa-exclamation-triangle"></i></a></label>
-                <input type="password" class="form-control {{#if errors.openAiAPIKey}}is-invalid{{/if}}"
-                    id="openAiAPIKey" name="openAiAPIKey" value="{{values.openAiAPIKey}}" data-lpignore="true"
-                    autocomplete="off" {{#if hasOpenAiAPIKey}} placeholder="API key is set but not shown&mldr;"
-                    {{/if}} />
-                {{#if errors.openAiAPIKey}}
-                <span class="invalid-feedback">{{errors.openAiAPIKey}}</span>
-                {{/if}}
-                <small class="form-text text-muted">OpenAI API key to use ChatGPT</small>
             </div>
 
         </div>
@@ -500,18 +493,65 @@
             document.getElementById('preview-header-elm').value = editorHtml.getValue();
             previewForm.submit();
         });
+
+
+        const editors = new Map();
+
+        const editorHtml = ace.edit("editor-html", {
+            enableBasicAutocompletion: true,
+            enableSnippets: false,
+            enableLiveAutocompletion: false,
+            useWorker: true
+        });
+        editors.set("editor-html", editorHtml);
+
+        editorHtml.setTheme("ace/theme/xcode");
+        editorHtml.session.setMode("ace/mode/handlebars");
+        editorHtml.session.setValue(document.getElementById('templateHeaderElement').value);
+
+        const editorEnv = ace.edit("editor-env", {
+            enableBasicAutocompletion: true,
+            enableSnippets: false,
+            enableLiveAutocompletion: false,
+            useWorker: true
+        });
+        editors.set("editor-env", editorEnv);
+
+        editorEnv.setTheme("ace/theme/xcode");
+        editorEnv.session.setMode("ace/mode/json");
+        editorEnv.session.setValue(document.getElementById('scriptEnvElement').value);
+
+        document.getElementById('settings-form').addEventListener('submit', () => {
+            document.getElementById('templateHeaderElement').value = editorHtml.getValue();
+            document.getElementById('scriptEnvElement').value = editorEnv.getValue();
+        });
+
+        for (let toggleElm of document.querySelectorAll('.toggle-fullscreen')) {
+            let target = toggleElm.dataset.target;
+            if (!editors.has(target)) {
+                continue
+            }
+            let targetElm = document.getElementById(target);
+            let editor = editors.get(target)
+
+            toggleElm.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                targetElm.classList.toggle('full-screen-div');
+                editor.resize();
+                editor.focus();
+            });
+
+            targetElm.addEventListener('keydown', e => {
+                if (e.key === 'Escape' && targetElm.classList.contains('full-screen-div')) {
+                    targetElm.classList.remove('full-screen-div')
+                    editor.resize();
+                    editor.focus();
+                }
+            });
+        }
+
     });
-
-    const editorHtml = ace.edit("editor-html");
-    editorHtml.setTheme("ace/theme/xcode");
-    editorHtml.session.setMode("ace/mode/handlebars");
-    editorHtml.session.setValue(document.getElementById('templateHeaderElement').value);
-
-    document.getElementById('settings-form').addEventListener('submit', () => {
-        document.getElementById('templateHeaderElement').value = editorHtml.getValue();
-    });
-
-
 
 
 </script>

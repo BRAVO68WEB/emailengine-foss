@@ -1,15 +1,14 @@
 .DS_Store
 node_modules
-package-lock.json
 .env
 dist/
 yarn.lock
 swagger.json
-static/licenses.html
 version-info.json
 ee-dist/
-config/development.toml
+config/development*
 .vscode
 .okta.env
 system.env
 keylog.txt
+package-lock.json

@@ -1,7 +1,7 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: \n"
-"POT-Creation-Date: 2022-11-11 10:19+0000\n"
+"POT-Creation-Date: 2023-10-31 12:21+0000\n"
 "PO-Revision-Date: \n"
 "Last-Translator: \n"
 "Language-Team: \n"
@@ -17,10 +17,6 @@ msgid "%d day"
 msgid_plural "%d days"
 msgstr[0] "%d päev"
 msgstr[1] "%d päeva"
-
-#: views/redirect.hbs:1
-msgid "Click <a href=\"%s\">here</a> to continue&mldr;"
-msgstr "Kliki <a href=\"%s\">siin</a>, et jätkata&mldr;"
 
 #: views/unsubscribe.hbs:1 views/unsubscribe.hbs:79
 msgid "Unsubscribe"
@@ -64,6 +60,10 @@ msgstr "E-posti aadress"
 #: views/unsubscribe.hbs:75 views/accounts/register/imap.hbs:27
 msgid "Enter your email address"
 msgstr "Sisestage oma e-posti aadress"
+
+#: views/redirect.hbs:1
+msgid "Click <a href=\"%s\">here</a> to continue&mldr;"
+msgstr "Kliki <a href=\"%s\">siin</a>, et jätkata&mldr;"
 
 #: views/accounts/register/imap.hbs:11
 msgid "Your name"
@@ -203,34 +203,41 @@ msgstr "SMTP server vastas järgmise teatega:"
 msgid "HTTP error!"
 msgstr "HTTP viga!"
 
-#: lib/routes-ui.js:3460 lib/routes-ui.js:4729 lib/routes-ui.js:4740
+#: lib/routes-ui.js:603
+msgid "Invalid API key for OpenAI"
+msgstr "OpenAI jaoks vale API võti"
+
+#: lib/routes-ui.js:4573 lib/routes-ui.js:6491 lib/routes-ui.js:6502
 msgid "Server hostname was not found"
 msgstr "Serverit ei leitud"
 
-#: lib/routes-ui.js:3463 lib/routes-ui.js:4732 lib/routes-ui.js:4743
+#: lib/routes-ui.js:4576 lib/routes-ui.js:6494 lib/routes-ui.js:6505
 msgid "Invalid username or password"
 msgstr "Vigane kasutajanimi või parool"
 
-#: lib/routes-ui.js:3467 lib/routes-ui.js:4747
+#: lib/routes-ui.js:4580 lib/routes-ui.js:6509
 msgid "TLS protocol error"
 msgstr "TLS protokolli viga"
 
-#: lib/routes-ui.js:4459
-msgid "Unknown OAuth provider"
-msgstr "Tundmatu OAuth teenus"
-
-#: lib/routes-ui.js:4499 lib/routes-ui.js:4608 lib/routes-ui.js:4832
-msgid "Signature validation failed"
-msgstr "Päringu allkirja kontroll ebaõnnestus"
-
-#: lib/routes-ui.js:4548 lib/routes-ui.js:4581 lib/routes-ui.js:6664
+#: lib/routes-ui.js:6303 lib/routes-ui.js:6343 lib/routes-ui.js:9037
 msgid "Failed to validate request arguments"
 msgstr "Päringu argumentide kontroll ebaõnnestus"
 
-#: lib/routes-ui.js:4671 lib/routes-ui.js:4914
+#: lib/routes-ui.js:6429 lib/routes-ui.js:6683
 msgid "Failed to process account"
 msgstr "Konto töötlemine ebaõnnestus"
 
-#: lib/routes-ui.js:6764
+#: lib/routes-ui.js:9137 lib/routes-ui.js:9170
 msgid "Failed to process request"
 msgstr "Päringu töötlemine ebaõnnestus"
+
+#: lib/tools.js:1334
+msgid "Signature validation failed"
+msgstr "Päringu allkirja kontroll ebaõnnestus"
+
+#: lib/tools.js:1343 lib/tools.js:1348
+msgid "Invalid or expired account setup URL"
+msgstr "Kehtetu või aegunud konto seadistamise URL"
+
+#~ msgid "Unknown OAuth provider"
+#~ msgstr "Tundmatu OAuth teenus"
