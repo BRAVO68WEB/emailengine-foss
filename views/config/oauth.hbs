@@ -19,15 +19,9 @@
         <a class="nav-link {{#if activeGmailService}}active{{/if}}" href="/admin/config/oauth-legacy/gmailService">Gmail
             Service Accounts</a>
     </li>
-
-    <!-- Do not expose Mail.RU by default (untested) -->
-    {{#if showMailRu}}
     <li class="nav-item">
-        <a class="nav-link {{#if activeMailRu}}active{{/if}}" href="/admin/config/oauth-legacy/mailRu">Mail.ru <span
-                class="badge badge-dark">beta</span></a>
+        <a class="nav-link {{#if activeMailRu}}active{{/if}}" href="/admin/config/oauth-legacy/mailRu">Mail.ru</a>
     </li>
-    {{/if}}
-
 </ul>
 
 <div class="card border-left-info shadow mb-4">
@@ -38,11 +32,14 @@
                 {{#if activeGmail}}
                 <div>Your OAuth2 project <strong>must</strong> have the following scopes enabled:</div>
                 <ul>
-                    <li><code>"https://mail.google.com/"</code>
+                    <li><code>"https://mail.google.com/"</code> when using IMAP and SMTP
+                    <li><code>"https://www.googleapis.com/auth/gmail.modify"</code> when using Gmail API
                 </ul>
-                <div>Read about setting up the OAuth2 project in Google Cloud from <a
-                        href="https://docs.emailengine.app/setting-up-gmail-oauth2-for-imap-api/" target="_blank"
-                        referrerpolicy="{{referrerPolicy}}">here</a>.
+                <div>Read about setting up the OAuth2 project in Google Cloud for <a
+                        href="https://emailengine.app/gmail-over-imap" target="_blank" rel="noopener noreferrer"
+                        referrerpolicy="no-referrer">IMAP
+                        and SMTP</a> or for <a href="https://emailengine.app/gmail-api" target="_blank"
+                        rel="noopener noreferrer" referrerpolicy="no-referrer">Gmail API</a>.
                 </div>
                 {{/if}}
 
@@ -52,8 +49,8 @@
                     <li><code>"https://mail.google.com/"</code>
                 </ul>
                 <div>Read about setting up Google service accounts from <a
-                        href="https://docs.emailengine.app/oauth-legacy/gmail-service-accounts/" target="_blank"
-                        referrerpolicy="{{referrerPolicy}}">here</a>.
+                        href="https://emailengine.app/google-service-accounts/" target="_blank"
+                        rel="noopener noreferrer" referrerpolicy="no-referrer">here</a>.
 
                 </div>
                 {{/if}}
@@ -67,8 +64,8 @@
                 </ul>
                 <div>
                     Read about setting up the OAuth2 project in Azure Active Directory from <a
-                        href="https://docs.emailengine.app/setting-up-oauth2-with-outlook/" target="_blank"
-                        referrerpolicy="{{referrerPolicy}}">here</a>.
+                        href="https://emailengine.app/outlook-and-ms-365" target="_blank" rel="noopener noreferrer"
+                        referrerpolicy="no-referrer">here</a>.
                 </div>
                 {{/if}}
 
@@ -80,8 +77,8 @@
                 </ul>
 
                 <div class="alert alert-info"><strong>NB!</strong> The required "mail.imap" scope might not be available
-                    for your <a href="https://oauth.mail.ru/app/" target="_blank"
-                        referrerpolicy="{{referrerPolicy}}">OAuth2
+                    for your <a href="https://oauth.mail.ru/app/" target="_blank" rel="noopener noreferrer"
+                        rel="noopener noreferrer" referrerpolicy="no-referrer">OAuth2
                         apps</a> by default.</div>
                 {{/if}}
 
@@ -101,7 +98,7 @@
 
         <div class="card-body">
 
-            <p>Setting up OAuth2 credentials allows refreshing expired access tokens.</p>
+            <p>Setting up OAuth2 credentials enables automatic refreshing of expired access tokens.</p>
 
             {{#if activeGmailService}}
 
@@ -113,13 +110,12 @@
                     <span class="text">Select service key file&#x2026;</span>
                 </button>
                 <small class="form-text text-muted">Select the JSON file you received after generating a new service key
-                    to
-                    retrieve the service values.</small>
+                    to retrieve the service values.</small>
             </div>
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">serviceClient</a>]
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">serviceClient</a>]
                 </div>
 
                 <label for="serviceClient">
@@ -134,8 +130,8 @@
             </div>
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">serviceKey</a>]
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">serviceKey</a>]
                 </div>
 
                 <label for="serviceKey">Secret service key</label>
@@ -153,8 +149,8 @@
             {{else}}
             <div class="form-group form-check">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">{{values.provider}}Enabled</a>]
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">{{values.provider}}Enabled</a>]
                 </div>
 
                 <input type="checkbox" class="form-check-input {{#if errors.oauth2Enabled}}is-invalid{{/if}}"
@@ -164,14 +160,14 @@
                 {{#if errors.oauth2Enabled}}
                 <span class="invalid-feedback">{{errors.oauth2Enabled}}</span>
                 {{/if}}
-                <small class="form-text text-muted">If enabled, then <em>"{{providerName}}"</em> is shown as an account
-                    type option when adding an account using the hosted authentication form.</small>
+                <small class="form-text text-muted">If enabled, <em>"{{providerName}}"</em> will appear as an account
+                    type option when adding accounts through the hosted authentication form.</small>
             </div>
 
             <div class="form-group">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">{{values.provider}}ClientId</a>]
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">{{values.provider}}ClientId</a>]
                 </div>
 
                 <label for="clientId">
@@ -197,8 +193,8 @@
 
             <div class="form-group">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">{{values.provider}}ClientSecret</a>]
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">{{values.provider}}ClientSecret</a>]
                 </div>
 
                 <label for="clientSecret">Client Secret</label>
@@ -215,8 +211,8 @@
 
             {{#if activeOutlook}}
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">{{values.provider}}Authority</a>]
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">{{values.provider}}Authority</a>]
                 </div>
 
                 <label for="authority">Supported account types</label>
@@ -234,8 +230,8 @@
             {{/if}}
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">{{values.provider}}RedirectUrl</a>]
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">{{values.provider}}RedirectUrl</a>]
                 </div>
 
                 <label for="redirectUrl">Redirect URL</label>
@@ -245,7 +241,7 @@
                 <span class="invalid-feedback">{{errors.redirectUrl}}</span>
                 {{/if}}
                 <small class="form-text text-muted">Redirect URL for OAuth2. If you are using EmailEngine's OAuth2 flow,
-                    then set it to <code>{{defaultRedirectUrl}}</code></small>
+                    set this to <code>{{defaultRedirectUrl}}</code></small>
             </div>
             {{/if}}
 
@@ -267,8 +263,8 @@
                 {{#if activeGmail}}
                 <div class="alert alert-info">When adding new scopes, ensure that related APIs are
                     enabled for your OAuth2 app (look for <em>Enabled APIs & services</em> in <a
-                        href="https://console.cloud.google.com/apis/dashboard" target="_blank"
-                        referrerpolicy="{{referrerPolicy}}">Google Cloud Console</a>)
+                        href="https://console.cloud.google.com/apis/dashboard" target="_blank" rel="noopener noreferrer"
+                        referrerpolicy="no-referrer">Google Cloud Console</a>)
                     before registering accounts with these permissions. Otherwise, token generations will fail.
                 </div>
                 {{/if}}
@@ -276,15 +272,15 @@
                 {{#if activeGmailService}}
                 <div class="alert alert-info">When adding new scopes, ensure that related APIs are
                     enabled for your OAuth2 app (look for <em>Enabled APIs & services</em> in <a
-                        href="https://console.cloud.google.com/apis/dashboard" target="_blank"
-                        referrerpolicy="{{referrerPolicy}}">Google Cloud Console</a>)
+                        href="https://console.cloud.google.com/apis/dashboard" target="_blank" rel="noopener noreferrer"
+                        referrerpolicy="no-referrer">Google Cloud Console</a>)
                     before registering accounts with these permissions. Otherwise, token generations will fail.
                 </div>
                 {{/if}}
 
                 <div class="form-group">
-                    <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                            target="_blank">{{values.provider}}ExtraScopes</a>]
+                    <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                            target="_blank" rel="noopener noreferrer">{{values.provider}}ExtraScopes</a>]
                     </div>
 
                     <label for="extraScopes">List of OAuth2 scopes</label>

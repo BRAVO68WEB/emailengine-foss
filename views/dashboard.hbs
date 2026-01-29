@@ -10,11 +10,11 @@
         <div class="card-body">
             <div class="row no-gutters align-items-center">
                 <div class="col mr-2">
-                    <div class="text-xs font-weight-bold text-danger text-uppercase mb-1">Compatiblity warning
+                    <div class="text-xs font-weight-bold text-danger text-uppercase mb-1">Compatibility warning
                     </div>
                     <p>EmailEngine is incompatible with Amazon ElastiCache as the database backend.</p>
                     <p>Please switch to a standard Redis instance. Using ElastiCache with EmailEngine can result in data
-                        loss and several functionalities may not work.</p>
+                        loss and some features may not work correctly.</p>
                 </div>
                 <div class="col-auto">
                     <i class="fas fa-exclamation-circle fa-2x text-gray-300"></i>
@@ -30,7 +30,7 @@
         <div class="card-body">
             <div class="row no-gutters align-items-center">
                 <div class="col mr-2">
-                    <div class="text-xs font-weight-bold text-danger text-uppercase mb-1">Compatiblity warning
+                    <div class="text-xs font-weight-bold text-danger text-uppercase mb-1">Compatibility warning
                     </div>
                     <p>EmailEngine is incompatible with Redis Cluster setup.</p>
                     <p>Please switch to a standard Redis primary instance.</p>
@@ -52,14 +52,12 @@
                 <div class="col mr-2">
                     <div class="text-xs font-weight-bold text-success text-uppercase mb-1">Welcome to EmailEngine!
                     </div>
-                    <p>To start using EmailEngine, add an email account to the <a href="/admin/accounts">account
-                            registry</a>. Once registered, you can access this account to send
-                        and receive emails using the <a href="/admin/swagger">EmailEngine's API</a>.
+                    <p>Get started by connecting your first email account. Once connected, you can send
+                        and receive emails through the <a href="/admin/swagger">API</a>.
                     </p>
-                    <p>You can add email accounts by using the API endpoint for <a
+                    <p class="text-muted small">You can also add accounts programmatically via the <a
                             href="https://api.emailengine.app/#operation/postV1Account" target="_blank"
-                            referrerpolicy="{{referrerPolicy}}">registering
-                            accounts</a> or the hosted authentication form.
+                            rel="noopener noreferrer" referrerpolicy="no-referrer">API endpoint</a>.
                     </p>
                     <div>
                         <button type="button" class="btn btn-primary btn-icon-split" data-toggle="modal"
@@ -67,7 +65,7 @@
                             <span class="icon text-white-50">
                                 <i class="fas fa-user-plus"></i>
                             </span>
-                            <span class="text">Add an account</span>
+                            <span class="text">Connect your first account</span>
                         </button>
                     </div>
                 </div>
@@ -94,7 +92,8 @@
                                 data-placement="top" style="cursor: default;">
                                 <a href="/admin/accounts">Accounts total</a>
                             </div>
-                            <div class="h5 mb-0 font-weight-bold text-gray-800">{{stats.accounts}}</div>
+                            <div class="h5 mb-0 font-weight-bold text-gray-800">{{formatInteger stats.accounts
+                                userLocale}}</div>
                         </div>
                         <div class="col-auto">
                             <i class="fas fa-users fa-2x text-gray-300"></i>
@@ -113,7 +112,8 @@
                                 data-toggle="tooltip" data-placement="top" style="cursor: default;">
                                 <a href="/admin/accounts?state=connected">Accounts active</a>
                             </div>
-                            <div class="h5 mb-0 font-weight-bold text-gray-800">{{stats.connectedAccounts}}</div>
+                            <div class="h5 mb-0 font-weight-bold text-gray-800">{{formatInteger stats.connectedAccounts
+                                userLocale}}</div>
                         </div>
                         <div class="col-auto">
                             <i class="fas fa-users fa-2x text-gray-300"></i>
@@ -135,7 +135,7 @@
                                 style="cursor: default;">
                                 {{title}}</div>
                             <div class="h5 mb-0 font-weight-bold text-gray-800">
-                                {{value}}
+                                {{formatInteger value userLocale}}
                             </div>
                         </div>
                         <div class="col-auto">
@@ -151,7 +151,7 @@
             {{#if
             stats.queues.notify.isPaused}}
             <div style="position: absolute; right: 18px; top: 2px; z-index: 1; cursor: default;"
-                title="EmailEngine is not processing entries for this queue" data-toggle="tooltip" data-placement="top">
+                title="EmailEngine is not processing entries in this queue" data-toggle="tooltip" data-placement="top">
                 <span class="badge badge-warning">paused</span>
             </div>
             {{/if}}
@@ -162,13 +162,13 @@
                             <div class="text-xs font-weight-bold text-primary text-uppercase mb-1"
                                 title="This queue processes webhook notifications" data-toggle="tooltip"
                                 data-placement="top" style="cursor: default;">
-                                <a href="/admin/arena/queue/notify">Webhooks queue</a>
+                                <a href="/admin/bull-board/queue/Webhooks%20Queue%20-%20notify">Webhooks queue</a>
                             </div>
                             <div class="h5 mb-0 font-weight-bold text-gray-800" style="cursor: default;">
                                 <span title="Queue entries total" data-toggle="tooltip"
-                                    data-placement="top">{{stats.queues.notify.total}}</span> /
+                                    data-placement="top">{{formatInteger stats.queues.notify.total userLocale}}</span> /
                                 <span title="Delayed queue entries" data-toggle="tooltip"
-                                    data-placement="top">{{stats.queues.notify.delayed}}</span>
+                                    data-placement="top">{{formatInteger stats.queues.notify.delayed userLocale}}</span>
                             </div>
                         </div>
                         <div class="col-auto">
@@ -183,7 +183,7 @@
             {{#if
             stats.queues.submit.isPaused}}
             <div style="position: absolute; right: 18px; top: 2px; z-index: 1; cursor: default;"
-                title="EmailEngine is not processing entries for this queue" data-toggle="tooltip" data-placement="top">
+                title="EmailEngine is not processing entries in this queue" data-toggle="tooltip" data-placement="top">
                 <span class="badge badge-warning">paused</span>
             </div>
             {{/if}}
@@ -192,16 +192,17 @@
                     <div class="row no-gutters align-items-center">
                         <div class="col mr-2">
                             <div class="text-xs font-weight-bold text-primary text-uppercase mb-1"
-                                title="This queue processes emails to be sent to SMTP" data-toggle="tooltip"
+                                title="This queue processes emails to be sent via SMTP" data-toggle="tooltip"
                                 data-placement="top" style="cursor: default;">
-                                <a href="/admin/arena/queue/submit">Submission queue</a>
+                                <a href="/admin/bull-board/queue/Submission%20Queue%20-%20submit">Submission queue</a>
                             </div>
                             <div class="h5 mb-0 font-weight-bold text-gray-800" style="cursor: default;">
                                 <span title="Queue entries total" data-toggle="tooltip"
-                                    data-placement="top">{{stats.queues.submit.total}}</span> /
+                                    data-placement="top">{{formatInteger stats.queues.submit.total userLocale}}</span> /
                                 <span
-                                    title="Delayed queue entries. This includes emails that are scheduled to be sent in the future."
-                                    data-toggle="tooltip" data-placement="top">{{stats.queues.submit.delayed}}</span>
+                                    title="Delayed queue entries, including emails scheduled to be sent later"
+                                    data-toggle="tooltip" data-placement="top">{{formatInteger
+                                    stats.queues.submit.delayed userLocale}}</span>
                             </div>
                         </div>
                         <div class="col-auto">
@@ -217,7 +218,7 @@
             {{#if
             stats.queues.documents.isPaused}}
             <div style="position: absolute; right: 18px; top: 2px; z-index: 1; cursor: default;"
-                title="EmailEngine is not processing entries for this queue" data-toggle="tooltip" data-placement="top">
+                title="EmailEngine is not processing entries in this queue" data-toggle="tooltip" data-placement="top">
                 <span class="badge badge-warning">paused</span>
             </div>
             {{/if}}
@@ -226,18 +227,19 @@
                     <div class="row no-gutters align-items-center">
                         <div class="col mr-2">
                             <div class="text-xs font-weight-bold text-primary text-uppercase mb-1"
-                                title="This queue indexes mailbox changes to ElasticSearch" data-toggle="tooltip"
+                                title="This queue indexes mailbox changes to Elasticsearch" data-toggle="tooltip"
                                 data-placement="top" style="cursor: default;">
-                                <a href="/admin/arena/queue/documents">Documents queue</a>
+                                <a href="/admin/bull-board/queue/Document%20Queue%20-%20documents">Documents queue</a>
                             </div>
                             <div class="h5 mb-0 font-weight-bold text-gray-800" style="cursor: default;">
                                 <span title="Queue entries total" data-toggle="tooltip" data-placement="top"></span>
 
-                                {{stats.queues.documents.total}}
+                                {{formatInteger stats.queues.documents.total userLocale}}
 
                                 </span> /
                                 <span title="Delayed queue entries" data-toggle="tooltip"
-                                    data-placement="top">{{stats.queues.documents.delayed}}</span>
+                                    data-placement="top">{{formatInteger stats.queues.documents.delayed
+                                    userLocale}}</span>
                             </div>
                         </div>
                         <div class="col-auto">
@@ -283,19 +285,21 @@
 
                 <ul class="list-group">
                     <li class="list-group-item"><a href="https://emailengine.app/" target="_blank"
-                            referrerpolicy="{{referrerPolicy}}">EmailEngine</a> v{{packageData.version}}</li>
+                            rel="noopener noreferrer" referrerpolicy="no-referrer">EmailEngine</a>
+                        v{{packageData.version}}</li>
                     <li class="list-group-item"><a href="https://nodejs.org/en/" target="_blank"
-                            referrerpolicy="{{referrerPolicy}}">Node.js</a> v{{stats.node}} ({{stats.arch}})</li>
-                    <li class="list-group-item"><a href="https://redis.io/" target="_blank"
-                            referrerpolicy="{{referrerPolicy}}">Redis</a> v{{stats.redis}}</li>
+                            rel="noopener noreferrer" referrerpolicy="no-referrer">Node.js</a> v{{stats.node}}
+                        ({{stats.arch}})</li>
+                    <li class="list-group-item"><a href="https://redis.io/" target="_blank" rel="noopener noreferrer"
+                            referrerpolicy="no-referrer">Redis</a> v{{stats.redis}}</li>
                     <li class="list-group-item"><a href="https://imapflow.com/" target="_blank"
-                            referrerpolicy="{{referrerPolicy}}">ImapFlow</a> v{{stats.imapflow}}</li>
+                            rel="noopener noreferrer" referrerpolicy="no-referrer">ImapFlow</a> v{{stats.imapflow}}</li>
                     <li class="list-group-item"><a href="https://docs.bullmq.io/" target="_blank"
-                            referrerpolicy="{{referrerPolicy}}">BullMQ</a> v{{stats.bullmq}}</li>
+                            rel="noopener noreferrer" referrerpolicy="no-referrer">BullMQ</a> v{{stats.bullmq}}</li>
                     {{#if stats.build.commit}}
                     <li class="list-group-item">Code version: <a
                             href="https://github.com/postalsys/emailengine/tree/{{stats.build.commit}}" target="_blank"
-                            referrerpolicy="{{referrerPolicy}}">{{stats.build.commit}}</a>
+                            rel="noopener noreferrer" referrerpolicy="no-referrer">{{stats.build.commit}}</a>
                     </li>
                     {{/if}}
                 </ul>

@@ -18,12 +18,12 @@
                         feature
 
                         <a href="#" tabindex="-1" role="button" data-toggle="popover" data-trigger="hover"
-                            style="dispaly: inline-block;" data-content="Requires ElasticSearch 8.8.0+"><i
+                            style="display: inline-block;" data-content="Requires ElasticSearch 8.8.0+"><i
                                 class="fas fa-info-circle text-info"></i></a>
 
                         {{#unless documentStoreEnabled}}
                         <a href="#" tabindex="-1" role="button" data-toggle="popover" data-trigger="hover"
-                            style="dispaly: inline-block;" data-title="Document store is not enabled"
+                            style="display: inline-block;" data-title="Document store is not enabled"
                             data-content="Document Store syncing must be enabled to use the &quot;Chat with emails&quot; feature"><i
                                 class="fas fa-exclamation-triangle text-danger"></i></a>
                         {{/unless}}
@@ -35,12 +35,13 @@
                     <small class="form-text text-muted">If enabled, then EmailEngine uses the OpenAI API to produce text
                         embeddings for emails in the document store. For this feature to work, ensure document store
                         syncing is active and that the OpenAI API key is configured. You can run chat requests with the
-                        <a href="/admin/iframe/docs#/Chat/postV1ChatAccount" target="_blank">Chat
+                        <a href="/admin/swagger#/Chat/postV1ChatAccount" target="_blank" rel="noopener noreferrer">Chat
                             API method</a>.</small>
                     <div class="mt-2"><small><strong>Important:</strong> EmailEngine will only create embeddings for
                             emails processed when the feature is active. To generate embeddings for previously stored
-                            emails, utilize the <a href="/admin/iframe/docs#/Account/putV1AccountAccountFlush"
-                                target="_blank">Flush API method</a>. This will force EmailEngine to re-process all
+                            emails, utilize the <a href="/admin/swagger#/Account/putV1AccountAccountFlush"
+                                target="_blank" rel="noopener noreferrer">Flush API method</a>. This will force
+                            EmailEngine to re-process all
                             emails in the Document Store.</small>
                     </div>
 
@@ -51,15 +52,14 @@
                 <div class="text-right" style="display: flex; flex-direction: column; justify-content: space-between;">
 
                     <div>
-                        <div class="text-muted code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                                target="_blank">documentStoreGenerateEmbeddings</a>]</div>
+                        <div class="text-muted code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                                target="_blank" rel="noopener noreferrer">documentStoreGenerateEmbeddings</a>]</div>
 
-                        <div class="text-muted code-link">[<a href="/admin/iframe/docs#/Chat/postV1ChatAccount"
-                                target="_blank">Chat&nbsp;with&nbsp;emails</a>]</div>
+                        <div class="text-muted code-link">[<a href="/admin/swagger#/Chat/postV1ChatAccount"
+                                target="_blank" rel="noopener noreferrer">Chat&nbsp;with&nbsp;emails</a>]</div>
 
-                        <div class="text-muted code-link">[<a
-                                href="/admin/iframe/docs#/Account/putV1AccountAccountFlush"
-                                target="_blank">Request&nbsp;account&nbsp;flush</a>]</div>
+                        <div class="text-muted code-link">[<a href="/admin/swagger#/Account/putV1AccountAccountFlush"
+                                target="_blank" rel="noopener noreferrer">Request&nbsp;account&nbsp;flush</a>]</div>
 
                         <div>
                             {{#if
@@ -96,8 +96,8 @@
 
             <div class="form-group">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">openAiAPIKey</a>]
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">openAiAPIKey</a>]
                 </div>
 
                 <label for="openAiAPIKey">OpenAI API key</label>
@@ -109,12 +109,12 @@
                 <span class="invalid-feedback">{{errors.openAiAPIKey}}</span>
                 {{/if}}
                 <small class="form-text text-muted">OpenAI API key. This is the same key that is set on the <a
-                        href="/admin/config/ai">LLM Integration</a> page.</small>
+                        href="/admin/config/ai">AI Processing</a> page.</small>
             </div>
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">documentStoreChatModel</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">documentStoreChatModel</a>]</div>
 
                 <label for="settingsServicedocumentStoreChatModel">OpenAI Model</label>
                 <select id="settingsServicedocumentStoreChatModel" class="custom-select custom-select-sm"
@@ -158,8 +158,8 @@
                 <div class="modal-body">
                     <div class="form-group">
                         <div class="text-muted float-right code-link">[API Reference: <a
-                                href="/admin/iframe/docs#/Chat/postV1ChatAccount"
-                                target="_blank">/v1/chat/{account}</a>]
+                                href="/admin/swagger#/Chat/postV1ChatAccount" target="_blank"
+                                rel="noopener noreferrer">/v1/chat/{account}</a>]
                         </div>
                         <label for="inputAccount">Account ID</label>
                         <input type="text" class="form-control" name="account" id="inputAccount"

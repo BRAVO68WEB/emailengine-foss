@@ -2,11 +2,11 @@
 
 'use strict';
 
-const config = require('wild-config');
+const config = require('@zone-eu/wild-config');
 const Redis = require('ioredis');
 const redisUrl = require('./lib/redis-url');
-const packageData = require('./package.json');
-const { threadId } = require('worker_threads');
+//const packageData = require('./package.json');
+//const { threadId } = require('worker_threads');
 const { readEnvValue } = require('./lib/tools');
 
 config.dbs = config.dbs || {
@@ -17,8 +17,8 @@ const redisConf = readEnvValue('EENGINE_REDIS') || readEnvValue('REDIS_URL') || 
 const REDIS_CONF = Object.assign(
     {
         // some defaults
-        showFriendlyErrorStack: true,
-        connectionName: `${packageData.name}@${packageData.version}[${process.pid}${threadId ? `:${threadId}` : ''}][scan]`
+        showFriendlyErrorStack: true
+        //connectionName: `${packageData.name}@${packageData.version}[${process.pid}${threadId ? `:${threadId}` : ''}][scan]`
     },
     typeof redisConf === 'string' ? redisUrl(redisConf) : redisConf || {}
 );

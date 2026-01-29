@@ -6,8 +6,8 @@
 </div>
 
 <p class="mb-4">
-    You can store all IMAP and SMTP traffic except user credentials and message content for selected accounts. You can
-    then download these logs for inspection. Account logging is not enabled by default.
+    Track API requests for debugging and monitoring. EmailEngine can log IMAP, SMTP, Gmail API, and MS Graph API
+    activity (credentials and message content are never logged). Download logs anytime for troubleshooting.
 </p>
 
 <form method="post" action="/admin/config/logging">
@@ -17,33 +17,34 @@
         <div class="card-body">
             <div class="form-group form-check">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">logs.all</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">logs.all</a>]</div>
 
                 <input type="checkbox" class="form-check-input or-else-all {{#if errors.all}}is-invalid{{/if}}"
                     data-target="log-list" id="settingsLogsAll" name="all" {{#if values.all}}checked{{/if}} />
-                <label class="form-check-label" for="settingsLogsAll">Store logs for all accounts</label>
+                <label class="form-check-label" for="settingsLogsAll">Enable Logging for All Accounts</label>
                 {{#if errors.all}}
                 <span class="invalid-feedback">{{errors.all}}</span>
                 {{/if}}
-                <small class="form-text text-muted">It is not recommended if EmailEngine tracks a large number of
-                    accounts.</small>
+                <small class="form-text text-muted">Turn on logging for every connected account. Use with caution-this
+                    can impact performance with many accounts.<br>
+                    <strong>Restart required</strong> after changing this setting.</small>
             </div>
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">logs.maxLogLines</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">logs.maxLogLines</a>]</div>
 
-                <label for="settingsLogsMaxLogLines">Maximum lines of logs to store per account</label>
+                <label for="settingsLogsMaxLogLines">Log Storage Limit (per account)</label>
                 <input type="number" class="form-control {{#if errors.maxLogLines}}is-invalid{{/if}}"
                     id="settingsLogsMaxLogLines" min="0" max="10000000" name="maxLogLines"
                     value="{{values.maxLogLines}}" />
                 {{#if errors.maxLogLines}}
                 <span class="invalid-feedback">{{errors.maxLogLines}}</span>
                 {{/if}}
-                <small class="form-text text-muted">Logs are stored in Redis, which in other words means RAM, so it
-                    might
-                    not be a good idea to store too much data in it.</small>
+                <small class="form-text text-muted">Maximum log entries to keep per account. Logs are stored in memory
+                    (Redis), so choose wisely to avoid running out of RAM.
+                </small>
             </div>
         </div>
     </div>
@@ -53,7 +54,7 @@
             <span class="icon text-white-50">
                 <i class="fas fa-cog"></i>
             </span>
-            <span class="text">Update settings</span>
+            <span class="text">Save Changes</span>
         </button>
     </div>
 

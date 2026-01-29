@@ -172,6 +172,22 @@ document.addEventListener('DOMContentLoaded', () => {
     updateRelativeTimes();
     setInterval(updateRelativeTimes, 15 * 1000);
 
+    for (let t of document.querySelectorAll('.local-time')) {
+        if (!t.dataset.time) {
+            continue;
+        }
+        let date = new Date(t.dataset.time);
+        t.textContent = new Intl.DateTimeFormat().format(date);
+    }
+
+    for (let t of document.querySelectorAll('.local-date-time')) {
+        if (!t.dataset.time) {
+            continue;
+        }
+        let date = new Date(t.dataset.time);
+        t.textContent = new Intl.DateTimeFormat(undefined, { timeStyle: 'medium', dateStyle: 'short' }).format(date);
+    }
+
     let clip = new ClipboardJS('.copy-btn');
     if (!clip) {
         console.log('Can not set up clipboard');
@@ -234,7 +250,8 @@ document.addEventListener('DOMContentLoaded', () => {
             case 'init':
                 stateLabel = {
                     type: 'info',
-                    name: 'Initializing'
+                    name: 'Initializing',
+                    spinner: true
                 };
                 break;
             case 'connecting':
@@ -256,31 +273,38 @@ document.addEventListener('DOMContentLoaded', () => {
                     name: 'Connected'
                 };
                 break;
+            case 'disabled':
+                stateLabel = {
+                    type: 'secondary',
+                    name: 'Disabled'
+                };
+                break;
+
             case 'authenticationError':
             case 'connectError': {
                 let errorMessage = error ? error.response : false;
                 if (error) {
                     switch (error.serverResponseCode) {
                         case 'ETIMEDOUT':
-                            errorMessage = 'Connection timed out. This usually happens when you are firewalled, for example are connecting to a wrong port.';
+                            errorMessage = 'Connection timed out. Check your firewall settings and verify the port number.';
                             break;
                         case 'ClosedAfterConnectTLS':
-                            errorMessage = 'Server unexpectedly closed the connection.';
+                            errorMessage = 'Server closed the connection unexpectedly. Try again or check server status.';
                             break;
                         case 'ClosedAfterConnectText':
                             errorMessage =
-                                'The server unexpectedly closed the connection. This usually happens when you try to connect to a TLS port without having TLS enabled.';
+                                'Server closed the connection. This often means TLS is required but not enabled.';
                             break;
                         case 'ECONNREFUSED':
                             errorMessage =
-                                'The server refused the connection. This usually happens when the server is not running, is overloaded, or you are connecting to a wrong host or port.';
+                                'Connection refused. Verify the server is running and check the hostname and port.';
                             break;
                     }
                 }
 
                 stateLabel = {
                     type: 'danger',
-                    name: 'Failed',
+                    name: 'Connection failed',
                     error: errorMessage
                 };
                 break;
@@ -463,5 +487,40 @@ document.addEventListener('DOMContentLoaded', () => {
                 })
             }).catch(err => console.error(err));
         });
+    }
+
+    for (let f of document.querySelectorAll('form.pending-form')) {
+        f.addEventListener('submit', () => {
+            for (let b of f.querySelectorAll('button[type="submit"], button:not([type])')) {
+                b.disabled = true;
+                b.classList.add('disabled');
+                let icon = b.querySelector('i.fas');
+                if (icon) {
+                    for (let [, className] of icon.classList.entries()) {
+                        if (/^fa-/.test(className)) {
+                            icon.classList.remove(className);
+                            icon.dataset.oldIcon = className;
+                            icon.classList.add('icon-updated');
+                        }
+                    }
+                    icon.classList.add('fa-spinner', 'fa-spin');
+                }
+            }
+        });
+    }
+});
+
+window.addEventListener('pageshow', () => {
+    for (let icon of document.querySelectorAll('i.icon-updated')) {
+        icon.classList.remove('fa-spinner', 'fa-spin', 'icon-updated');
+        if (icon.dataset.oldIcon) {
+            icon.classList.add(icon.dataset.oldIcon);
+            icon.dataset.oldIcon = '';
+        }
+    }
+
+    for (let b of document.querySelectorAll('.disabled')) {
+        b.classList.remove('disabled');
+        b.disabled = false;
     }
 });

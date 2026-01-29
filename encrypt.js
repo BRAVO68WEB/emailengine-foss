@@ -1,7 +1,7 @@
 'use strict';
 
 if (!process.env.EE_ENV_LOADED) {
-    require('dotenv').config(); // eslint-disable-line global-require
+    require('dotenv').config({ quiet: true });
     process.env.EE_ENV_LOADED = 'true';
 }
 
@@ -12,7 +12,7 @@ try {
 }
 
 const { redis } = require('./lib/db');
-const config = require('wild-config');
+const config = require('@zone-eu/wild-config');
 const { encrypt, decrypt, parseEncryptedData } = require('./lib/encrypt');
 const { encryptedKeys } = require('./lib/settings');
 const getSecret = require('./lib/get-secret');
@@ -77,7 +77,7 @@ async function main() {
         console.error(' --service.secret is the secret value to use for encryption.');
         console.error('   Leave empty to remove encryption.');
         console.error(' --decrypt is the old secret value. Not needed if current passwords are not encrypted.');
-        console.error('   You can set this value multiple times if accounts are enrypted with different secrets.');
+        console.error('   You can set this value multiple times if accounts are encrypted with different secrets.');
         return;
     }
 
@@ -218,7 +218,7 @@ async function main() {
 
         try {
             let appUpdated = false;
-            for (let key of ['clientSecret', 'serviceKey']) {
+            for (let key of ['clientSecret', 'serviceKey', 'accessToken']) {
                 if (entry[key]) {
                     let value = await processSecret(entry[key], encryptSecret);
                     if (value !== entry[key]) {

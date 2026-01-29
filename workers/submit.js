@@ -3,7 +3,7 @@
 const { parentPort } = require('worker_threads');
 
 const packageData = require('../package.json');
-const config = require('wild-config');
+const config = require('@zone-eu/wild-config');
 const logger = require('../lib/logger');
 
 const { REDIS_PREFIX } = require('../lib/consts');
@@ -60,6 +60,8 @@ const EENGINE_TIMEOUT = getDuration(readEnvValue('EENGINE_TIMEOUT') || config.se
 
 const SUBMIT_QC = (readEnvValue('EENGINE_SUBMIT_QC') && Number(readEnvValue('EENGINE_SUBMIT_QC'))) || config.queues.submit || 1;
 
+const SUBMIT_DELAY = getDuration(readEnvValue('EENGINE_SUBMIT_DELAY') || config.submitDelay) || null;
+
 let callQueue = new Map();
 let mids = 0;
 
@@ -113,7 +115,7 @@ async function notify(account, event, data) {
         event
     });
 
-    let serviceUrl = (await settings.get('serviceUrl')) || true;
+    let serviceUrl = (await settings.get('serviceUrl')) || null;
 
     let payload = {
         serviceUrl,
@@ -286,15 +288,16 @@ const submitWorker = new Worker(
                         message: err.message,
                         code: err.code,
                         statusCode: err.statusCode
-                    }
+                    },
+                    networkRouting: err.info?.networkRouting
                 });
             } catch (err) {
                 // ignore
             }
 
-            if (err.statusCode >= 500 && job.attemptsMade < job.opts.attempts) {
+            if (err.statusCode >= 500 && err.statusCode !== 503 && job.attemptsMade < job.opts.attempts) {
                 try {
-                    // do not retry after 5xx error
+                    // do not retry after 5xx error (except 503 which is transient)
                     await job.discard();
                     logger.info({
                         msg: 'Job discarded',
@@ -302,9 +305,6 @@ const submitWorker = new Worker(
                         queueId: job.data.queueId
                     });
                 } catch (E) {
-                    // ignore
-                    logger.error({ msg: 'Failed to discard job', account: queueEntry.account, queueId: job.data.queueId, err: E });
-
                     logger.error({
                         msg: 'Failed to discard job',
                         action: 'submit',
@@ -324,7 +324,25 @@ const submitWorker = new Worker(
     },
     Object.assign(
         {
-            concurrency: SUBMIT_QC
+            concurrency: SUBMIT_QC,
+
+            // Lock duration must exceed SMTP socket timeout (2 min) to prevent
+            // jobs from being marked stalled during normal email delivery
+            lockDuration: 3 * 60 * 1000, // 3 minutes
+
+            // Check for stalled jobs every 60 seconds
+            stalledInterval: 60 * 1000,
+
+            // Allow jobs to recover from stalled state up to 3 times before failing
+            // This handles transient Redis latency or connection issues
+            maxStalledCount: 3,
+
+            limiter: SUBMIT_DELAY
+                ? {
+                      max: 1,
+                      duration: SUBMIT_DELAY
+                  }
+                : null
         },
         queueConf
     )
@@ -381,7 +399,8 @@ submitWorker.on('failed', async job => {
             await notify(job.data.account, EMAIL_FAILED_NOTIFY, {
                 messageId: job.data.messageId,
                 queueId: job.data.queueId,
-                error: job.stacktrace && job.stacktrace[0] && job.stacktrace[0].split('\n').shift()
+                error: job.stacktrace && job.stacktrace[0] && job.stacktrace[0].split('\n').shift(),
+                networkRouting: job.progress?.networkRouting
             });
         }
     }
@@ -410,6 +429,18 @@ async function onCommand(command) {
     }
 }
 
+// Start sending heartbeats to main thread
+setInterval(() => {
+    try {
+        parentPort.postMessage({ cmd: 'heartbeat' });
+    } catch (err) {
+        // Ignore errors, parent might be shutting down
+    }
+}, 10 * 1000).unref();
+
+// Send initial ready signal
+parentPort.postMessage({ cmd: 'ready' });
+
 parentPort.on('message', message => {
     if (message && message.cmd === 'resp' && message.mid && callQueue.has(message.mid)) {
         let { resolve, reject, timer } = callQueue.get(message.mid);
@@ -422,6 +453,9 @@ parentPort.on('message', message => {
             }
             if (message.statusCode) {
                 err.statusCode = message.statusCode;
+            }
+            if (message.info) {
+                err.info = message.info;
             }
             return reject(err);
         } else {

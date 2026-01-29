@@ -1,7 +1,7 @@
 <div class="float-right">
     <div class="btn-group">
         <button class="btn btn-primary dropdown-toggle" data-toggle="dropdown" aria-expanded="false">
-            <i class="fas fa-plus fa-fw" id="test-smtp-icon"></i> Create new
+            <i class="fas fa-plus fa-fw" id="test-smtp-icon"></i> Create OAuth2 app
         </button>
         <div class="dropdown-menu">
             <a class="dropdown-item" href="{{newLink}}?provider=gmail">Gmail</a>
@@ -28,6 +28,9 @@
                     </th>
                     <th class="p-0">
                         <div class="p-2">Type</div>
+                    </th>
+                    <th class="p-0">
+                        <div class="p-2">Base scopes</div>
                     </th>
                     <th class="p-0">
                         <div class="p-2">Provider ID <a href="#" tabindex="-1" role="button" data-toggle="popover"
@@ -60,6 +63,12 @@
                     <td class="p-0">
                         <div class="position-relative p-2">
                             <a href="/admin/config/oauth/app/{{id}}" class="stretched-link"></a>{{providerData.comment}}
+                        </div>
+                    </td>
+
+                    <td class="p-0">
+                        <div class="position-relative p-2">
+                            <a href="/admin/config/oauth/app/{{id}}" class="stretched-link"></a>{{baseScopesText}}
                         </div>
                     </td>
 
@@ -126,7 +135,7 @@
             {{#if firstPage}}
             No OAuth2 apps have been registered yet.
             {{else}}
-            Nothing to show here.
+            No OAuth2 apps found.
             {{/if}}
         </p>
     </div>
