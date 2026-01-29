@@ -6,11 +6,14 @@ on:
 permissions:
     contents: write
     pull-requests: write
+    packages: write
+    attestations: write
     id-token: write
 
-name: release
+name: Manage Release
 jobs:
     release_please:
+        name: Create or prepare release
         runs-on: ubuntu-latest
         outputs:
             major: ${{ steps.release.outputs.major }}
@@ -18,28 +21,45 @@ jobs:
             patch: ${{ steps.release.outputs.patch }}
             release_created: ${{ steps.release.outputs.release_created }}
         steps:
-            - uses: google-github-actions/release-please-action@v3
+            - uses: googleapis/release-please-action@v4
               id: release
               with:
                   release-type: node
-                  package-name: ${{vars.PACKAGE_NAME}}
-                  pull-request-title-pattern: 'chore${scope}: release ${version} [skip-ci]'
-                  prerelease: true
 
             # The logic below handles the npm publication:
             - uses: actions/checkout@v4
               # these if statements ensure that a publication only occurs when
               # a new release is created:
               if: ${{ steps.release.outputs.release_created }}
-            - uses: actions/setup-node@v3
+
+            - uses: actions/setup-node@v4
               with:
                   node-version: 20
-                  registry-url: 'https://registry.npmjs.org'
+                  registry-url: "https://registry.npmjs.org"
               if: ${{ steps.release.outputs.release_created }}
+
             - run: npm install
               if: ${{ steps.release.outputs.release_created }}
 
+    publish:
+        name: Publish NPM package
+        runs-on: ubuntu-latest
+        needs: release_please
+        if: ${{needs.release_please.outputs.release_created}}
+        permissions:
+            contents: read
+            id-token: write
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 24
+                  registry-url: "https://registry.npmjs.org"
+            - run: npm ci
+            - run: npm publish --provenance --access public
+
     publish_docker:
+        name: Publish Tagged Docker Image
         runs-on: ubuntu-latest
         needs: release_please
         if: ${{needs.release_please.outputs.release_created}}
@@ -51,13 +71,13 @@ jobs:
             - name: Set up QEMU
               uses: docker/setup-qemu-action@v3
               with:
-                  platforms: 'arm64,arm'
+                  platforms: "arm64,arm"
 
             - name: Set up Docker Buildx
               id: buildx
               uses: docker/setup-buildx-action@v3
               with:
-                  platforms: linux/arm64,linux/amd64,linux/arm/v7
+                  platforms: linux/amd64,linux/arm64/v8
 
             - name: Login to DockerHub
               uses: docker/login-action@v3
@@ -73,7 +93,7 @@ jobs:
                   password: ${{ secrets.GITHUB_TOKEN }}
 
             - name: Build and push
-              uses: docker/build-push-action@v5
+              uses: docker/build-push-action@v6
               with:
                   context: .
                   platforms: ${{ steps.buildx.outputs.platforms }}
@@ -82,3 +102,6 @@ jobs:
                       ${{ github.repository }}:v${{needs.release_please.outputs.major}}.${{needs.release_please.outputs.minor}}.${{needs.release_please.outputs.patch}}
                       ${{ github.repository }}:v${{needs.release_please.outputs.major}}.${{needs.release_please.outputs.minor}}
                       ${{ github.repository }}:v${{needs.release_please.outputs.major}}
+                      ghcr.io/${{ github.repository }}:v${{needs.release_please.outputs.major}}.${{needs.release_please.outputs.minor}}.${{needs.release_please.outputs.patch}}
+                      ghcr.io/${{ github.repository }}:v${{needs.release_please.outputs.major}}.${{needs.release_please.outputs.minor}}
+                      ghcr.io/${{ github.repository }}:v${{needs.release_please.outputs.major}}

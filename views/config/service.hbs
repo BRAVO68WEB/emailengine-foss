@@ -2,24 +2,24 @@
     <h1 class="h3 mb-0 text-gray-800">
 
         <small><i class="fas fa-cog fa-fw"></i></small>
-        Service
+        General Settings
     </h1>
 </div>
 
-<p class="mb-4">General settings for EmailEngine.</p>
+<p class="mb-4">Configure core settings for your EmailEngine instance.</p>
 
 <form method="post" id="settings-form" action="/admin/config/service">
     <input type="hidden" id="crumb" name="crumb" value="{{crumb}}" />
 
     <div class="card mb-4">
         <div class="card-header py-3">
-            <h6 class="m-0 font-weight-bold text-primary">General settings</h6>
+            <h6 class="m-0 font-weight-bold text-primary">System Configuration</h6>
         </div>
         <div class="card-body">
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">serviceUrl</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">serviceUrl</a>]</div>
 
                 <label for="settingsServiceUrl">Service URL</label>
                 <input type="url" class="form-control {{#if errors.serviceUrl}}is-invalid{{/if}}"
@@ -28,55 +28,29 @@
                 {{#if errors.serviceUrl}}
                 <span class="invalid-feedback">{{errors.serviceUrl}}</span>
                 {{/if}}
-                <small class="form-text text-muted">Base URL for EmailEngine without the path part.</small>
+                <small class="form-text text-muted">Base URL where EmailEngine is accessible (without any path).</small>
             </div>
 
             <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">enableApiProxy</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">enableApiProxy</a>]</div>
 
                 <input type="checkbox" class="form-check-input {{#if errors.enableApiProxy}}is-invalid{{/if}}"
                     id="enableApiProxy" name="enableApiProxy" {{#if values.enableApiProxy}}checked{{/if}} />
-                <label class="form-check-label" for="enableApiProxy">Reverse proxy support</label>
+                <label class="form-check-label" for="enableApiProxy">Behind Reverse Proxy</label>
                 {{#if errors.enableApiProxy}}
                 <span class="invalid-feedback">{{errors.enableApiProxy}}</span>
                 {{/if}}
-                <small class="form-text text-muted">If enabled, then EmailEngine looks for the client
-                    IP address from the <code>X-Forwarded-For</code> header. Disable this option if EmailEngine handles
-                    web requests directly and is not behind a reverse proxy like Nginx or Caddy.</small>
+                <small class="form-text text-muted">Enable if using Nginx, Caddy, or similar. Uses
+                    <code>X-Forwarded-For</code> headers to identify client IPs.</small>
             </div>
 
-            <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">locale</a>]</div>
-
-                <label for="settingsServiceLocale">Default language</label>
-                <select id="settingsServiceLocale" class="custom-select custom-select-sm" name="locale" {{#if
-                    errors.locale}}is-invalid{{/if}}>
-                    {{#each locales}}
-                    <option value="{{locale}}" {{#if selected}}selected{{/if}}>{{name}}</option>
-                    {{/each}}
-                </select>
-                {{#if errors.locale}}
-                <span class="invalid-feedback">{{errors.locale}}</span>
-                {{/if}}
-                <small class="form-text text-muted">Language for <u data-toggle="popover" data-trigger="hover"
-                        data-html="true"
-                        data-content="&#x3C;img src=&#x22;/static/preview/translation.png&#x22; width=&#x22;250&#x22; &#x3E;"
-                        style="cursor: default;">public pages</u>, e.g., for the <a
-                        href="https://emailengine.app/hosted-authentication" target="_blank"
-                        referrerpolicy="{{referrerPolicy}}">hosted authentication</a>
-                    form. <a href="https://github.com/postalsys/emailengine/blob/master/translations/README.md"
-                        target="_blank" referrerpolicy="{{referrerPolicy}}">See
-                        here</a>
-                    if you would like to add an additional translation.</small>
-            </div>
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">timezone</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">timezone</a>]</div>
 
-                <label for="settingsServiceTimezone">Default timezone</label>
+                <label for="settingsServiceTimezone">Timezone</label>
                 <select id="settingsServiceTimezone" class="custom-select custom-select-sm" name="timezone" {{#if
                     errors.timezone}}is-invalid{{/if}}>
                     {{#each timezones}}
@@ -90,17 +64,74 @@
         </div>
     </div>
 
+    <div class="card mb-4" id="language">
+        <div class="card-header py-3">
+            <h6 class="m-0 font-weight-bold text-primary">Language</h6>
+        </div>
+        <div class="card-body">
+            <div class="form-group">
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">locale</a>]</div>
+
+                <label for="settingsServiceLocale">Default Language</label>
+                <select id="settingsServiceLocale" class="custom-select custom-select-sm" name="locale" {{#if
+                    errors.locale}}is-invalid{{/if}}>
+                    {{#each locales}}
+                    <option value="{{locale}}" {{#if selected}}selected{{/if}}>{{name}} ({{locale}})</option>
+                    {{/each}}
+                </select>
+                {{#if errors.locale}}
+                <span class="invalid-feedback">{{errors.locale}}</span>
+                {{/if}}
+                <small class="form-text text-muted">
+                    Default language for UI and API responses.
+                    <a href="#languageDetails" data-toggle="collapse" aria-expanded="false"
+                        aria-controls="languageDetails">
+                        How to override <i class="fas fa-chevron-down fa-sm"></i>
+                    </a>
+                </small>
+            </div>
+
+            <div class="collapse" id="languageDetails">
+                <div class="alert alert-info">
+                    <h6 class="alert-heading font-weight-bold">Override Language Settings</h6>
+                    <p>Set language per request (highest to lowest priority):</p>
+                    <ol class="mb-3">
+                        <li><strong>URL parameter:</strong> <code>?locale=xx</code></li>
+                        <li><strong>Custom header:</strong> <code>X-EE-Locale: xx</code> (API only)</li>
+                        <li><strong>Browser preference:</strong> <code>Accept-Language</code> header</li>
+                        <li><strong>Default:</strong> Language selected above</li>
+                    </ol>
+
+                    <strong>Examples:</strong>
+                    <ul class="mb-0">
+                        <li>Web: <code>/accounts/new?locale=et</code></li>
+                        <li>API: <code>GET /v1/accounts?locale=nl</code></li>
+                        <li>Header: <code>X-EE-Locale: de</code></li>
+                    </ul>
+                </div>
+            </div>
+
+            <p class="mb-0">
+                <a href="https://github.com/postalsys/emailengine/blob/master/translations/README.md" target="_blank"
+                    rel="noopener noreferrer" referrerpolicy="no-referrer">
+                    <i class="fas fa-external-link-alt fa-sm"></i> Help us translate EmailEngine
+                </a>
+            </p>
+        </div>
+    </div>
+
     <div class="card mb-4" id="security">
         <div class="card-header py-3">
-            <h6 class="m-0 font-weight-bold text-primary">Security settings</h6>
+            <h6 class="m-0 font-weight-bold text-primary">Security</h6>
         </div>
         <div class="card-body">
 
             <div class="form-group">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">serviceSecret</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">serviceSecret</a>]</div>
 
-                <label for="settingsServiceSecret">Service secret</label>
+                <label for="settingsServiceSecret">Service Secret</label>
 
                 <div class="input-group">
                     <input type="password" class="form-control {{#if errors.serviceSecret}}is-invalid{{/if}}"
@@ -116,17 +147,17 @@
                 {{#if errors.serviceSecret}}
                 <span class="invalid-feedback">{{errors.serviceSecret}}</span>
                 {{/if}}
-                <small class="form-text text-muted">HMAC secret for signing public requests. Changing this value
-                    invalidates all tracking links in emails that were sent with the tracking option enabled.</small>
+                <small class="form-text text-muted">HMAC key for signing public requests. Changing this invalidates all
+                    existing tracking links.</small>
             </div>
 
             <div class="form-group form-check">
 
-                <div class="text-muted float-right code-link">[<em>Web UI only</em>]</div>
+                <div class="text-muted float-right code-link">[EENGINE_REQUIRE_API_AUTH]</div>
 
                 <input type="checkbox" class="form-check-input {{#if errors.enableTokens}}is-invalid{{/if}}"
                     id="enableTokens" name="enableTokens" {{#if values.enableTokens}}checked{{/if}} />
-                <label class="form-check-label" for="enableTokens">Require Access Tokens
+                <label class="form-check-label" for="enableTokens">Require API Authentication
 
                     <span class="badge badge-{{#if values.enableTokens}}success{{else}}danger{{/if}}">{{#if
                         values.enableTokens}}enabled{{else}}disabled{{/if}}</span>
@@ -134,61 +165,72 @@
                 {{#if errors.enableTokens}}
                 <span class="invalid-feedback">{{errors.enableTokens}}</span>
                 {{/if}}
-                <small class="form-text text-muted">You can disable access tokens when in development. Not
-                    requiring access tokens to authorize API requests makes running API requests from the
-                    command line easier. Always enable access tokens in production.</small>
+                <small class="form-text text-muted">Disable for development only. Always enable in production for secure
+                    API access. Set <code>EENGINE_REQUIRE_API_AUTH=false</code> at startup to disable by default (not recommended).</small>
             </div>
 
             <div class="form-group form-check">
 
                 <div class="text-muted float-right code-link">[<a
                         href="https://docs.emailengine.app/enabling-secret-encryption/" target="_blank"
-                        referrerpolicy="{{referrerPolicy}}">EENGINE_SECRET</a>]</div>
+                        rel="noopener noreferrer" referrerpolicy="no-referrer">EENGINE_SECRET</a>]</div>
 
                 <input type="checkbox" class="form-check-input" id="encryption" {{#if encryption}}checked{{/if}}
                     disabled />
-                <label class="form-check-label" for="encryption">Field level encryption
+                <label class="form-check-label" for="encryption">Data Encryption
 
                     <span class="badge badge-{{#if encryption}}success{{else}}danger{{/if}}">{{#if
                         encryption}}enabled{{else}}disabled{{/if}}</span>
 
                 </label>
-                <small class="form-text text-muted">You can not change encryption settings runtime. Set
-                    <code>EENGINE_SECRET</code>
-                    environment variable when starting EmailEngine to enable encryption. Read more <a
-                        href="https://docs.emailengine.app/enabling-secret-encryption/" target="_blank"
-                        referrerpolicy="{{referrerPolicy}}">from the
-                        documentation</a>.</small>
+                <small class="form-text text-muted">Set <code>EENGINE_SECRET</code> environment variable at startup to
+                    enable. <a href="https://docs.emailengine.app/enabling-secret-encryption/" target="_blank"
+                        rel="noopener noreferrer" referrerpolicy="no-referrer">Learn more</a></small>
             </div>
 
+
             <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<em>Web UI only</em>]</div>
+
+                <div class="text-muted float-right code-link">[EENGINE_ADMIN_ACCESS_ADDRESSES]</div>
+
+                <input type="checkbox" class="form-check-input" id="adminAccessLimit" {{#if
+                    adminAccessLimit}}checked{{/if}} disabled />
+                <label class="form-check-label" for="adminAccessLimit">Admin IP Restrictions
+
+                    <span class="badge badge-{{#if adminAccessLimit}}success{{else}}danger{{/if}}">{{#if
+                        adminAccessLimit}}enabled{{else}}disabled{{/if}}</span>
+
+                </label>
+                <small class="form-text text-muted">Set <code>EENGINE_ADMIN_ACCESS_ADDRESSES</code> at startup with
+                    comma-separated IP addresses or CIDR ranges (e.g., "192.168.1.1,10.0.0.0/24").</small>
+            </div>
+
+
+            <div class="form-group form-check">
+                <div class="text-muted float-right code-link">[EENGINE_ENABLE_OAUTH_TOKENS_API]</div>
                 <input type="checkbox" class="form-check-input {{#if errors.enableOAuthTokensApi}}is-invalid{{/if}}"
                     id="enableOAuthTokensApi" name="enableOAuthTokensApi" {{#if
                     values.enableOAuthTokensApi}}checked{{/if}} />
-                <label class="form-check-label" for="enableOAuthTokensApi">Allow the API endpoint for fetching OAuth2
-                    access
-                    tokens</label>
+                <label class="form-check-label" for="enableOAuthTokensApi">Allow OAuth2 Token Access via API</label>
                 {{#if errors.enableOAuthTokensApi}}
                 <span class="invalid-feedback">{{errors.enableOAuthTokensApi}}</span>
                 {{/if}}
-                <small class="form-text text-muted">If you want to re-use access tokens managed by EmailEngine in other
-                    parts of your app, you can enable the <a
-                        href="/admin/iframe/docs#/Account/getV1AccountAccountOauthtoken" target="_blank">oauth-token API
-                        endpoint</a>. Access to OAuth2 tokens is disabled by default due to the security risk of
-                    potentially leaking these tokens.</small>
+                <small class="form-text text-muted">Enable <a
+                        href="/admin/swagger#/Account/getV1AccountAccountOauthtoken" target="_blank"
+                        rel="noopener noreferrer">API endpoint</a> to retrieve OAuth2 tokens. Set
+                    <code>EENGINE_ENABLE_OAUTH_TOKENS_API=true</code> at startup to enable
+                    by default.</small>
             </div>
 
 
             <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">ignoreMailCertErrors</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">ignoreMailCertErrors</a>]</div>
 
                 <input type="checkbox" class="form-check-input {{#if errors.ignoreMailCertErrors}}is-invalid{{/if}}"
                     id="ignoreMailCertErrors" name="ignoreMailCertErrors" {{#if
                     values.ignoreMailCertErrors}}checked{{/if}} />
-                <label class="form-check-label" for="ignoreMailCertErrors">Allow insecure certificates for
-                    IMAP/SMTP
+                <label class="form-check-label" for="ignoreMailCertErrors">Allow Insecure Email Certificates
 
                     <span class="badge badge-{{#if values.ignoreMailCertErrors}}danger{{else}}success{{/if}}">{{#if
                         values.ignoreMailCertErrors}}enabled{{else}}disabled{{/if}}</span>
@@ -197,8 +239,8 @@
                 {{#if errors.ignoreMailCertErrors}}
                 <span class="invalid-feedback">{{errors.ignoreMailCertErrors}}</span>
                 {{/if}}
-                <small class="form-text text-muted">Enabling this will permit EmailEngine to bypass security warnings
-                    related to self-signed or expired TLS certificates during IMAP and SMTP interactions.</small>
+                <small class="form-text text-muted">Accept self-signed or expired certificates for IMAP/SMTP
+                    connections. Not recommended.</small>
             </div>
 
         </div>
@@ -206,7 +248,7 @@
 
     <div id="queue_settings" class="card mb-4">
         <div class="card-header py-3 d-flex flex-row align-items-center justify-content-between">
-            <h6 class="m-0 font-weight-bold text-primary">Queue settings</h6>
+            <h6 class="m-0 font-weight-bold text-primary">Queue Management</h6>
             <div class="dropdown no-arrow">
                 <a class="dropdown-toggle" href="#" role="button" id="dropdownMenuLink" data-toggle="dropdown"
                     aria-haspopup="true" aria-expanded="false">
@@ -214,9 +256,9 @@
                 </a>
                 <div class="dropdown-menu dropdown-menu-right shadow animated--fade-in"
                     aria-labelledby="dropdownMenuLink">
-                    <div class="dropdown-header">Queue actions:</div>
+                    <div class="dropdown-header">Actions:</div>
                     <a class="dropdown-item" href="#" id="clean-queues-btn">
-                        <i class="fas fa-trash-alt fa-sm clean-icon"></i> <span>Clear completed queue entries</span>
+                        <i class="fas fa-trash-alt fa-sm clean-icon"></i> <span>Clear completed jobs</span>
                     </a>
                 </div>
             </div>
@@ -225,19 +267,19 @@
         <div class="card-body">
             <div class="form-group">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">queueKeep</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">queueKeep</a>]</div>
 
-                <label for="settingsQueueKeep">How many completed/failed queue entries to keep</label>
+                <label for="settingsQueueKeep">Job History Limit</label>
                 <input type="number" min="0" class="form-control {{#if errors.queueKeep}}is-invalid{{/if}}"
                     id="settingsQueueKeep" name="queueKeep" value="{{values.queueKeep}}" data-lpignore="true"
                     autocomplete="off" />
                 {{#if errors.queueKeep}}
                 <span class="invalid-feedback">{{errors.queueKeep}}</span>
                 {{/if}}
-                <small class="form-text text-muted">By default, all queued job entries are deleted after processed, so
-                    "Failed" and "Completed" lists are empty in <a href="/admin/arena" target="_blank">Bull Arena</a>.
-                    Set this value if you want to keep a fixed number of the latest entries in the list.</small>
+                <small class="form-text text-muted">Number of completed/failed jobs to keep in <a
+                        href="/admin/bull-board" target="_blank" rel="noopener noreferrer">Bull Board</a>. Set to 0 to
+                    disable history.</small>
             </div>
 
         </div>
@@ -245,31 +287,98 @@
 
     <div id="submission_settings" class="card mb-4">
         <div class="card-header py-3">
-            <h6 class="m-0 font-weight-bold text-primary">Email submission settings</h6>
+            <h6 class="m-0 font-weight-bold text-primary">Email Delivery</h6>
         </div>
         <div class="card-body">
             <div class="form-group">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">deliveryAttempts</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">deliveryAttempts</a>]</div>
 
-                <label for="settingsDeliveryAttempts">How many times to retry a failed email sending</label>
+                <label for="settingsDeliveryAttempts">Retry Attempts</label>
                 <input type="number" min="0" class="form-control {{#if errors.deliveryAttempts}}is-invalid{{/if}}"
                     id="settingsDeliveryAttempts" name="deliveryAttempts" value="{{values.deliveryAttempts}}"
                     data-lpignore="true" autocomplete="off" />
                 {{#if errors.deliveryAttempts}}
                 <span class="invalid-feedback">{{errors.deliveryAttempts}}</span>
                 {{/if}}
-                <small class="form-text text-muted">If EmailEngine cannot deliver an email to an SMTP server, it will
-                    attempt to retry the action for the specified number of attempts.</small>
+                <small class="form-text text-muted">How many times to retry failed email deliveries.</small>
             </div>
 
         </div>
     </div>
 
+    <div id="submission_settings" class="card mb-4">
+        <div class="card-header py-3">
+            <h6 class="m-0 font-weight-bold text-primary">IMAP Processing</h6>
+        </div>
+        <div class="card-body">
+            <div class="form-group">
+
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">imapIndexer</a>]</div>
+
+                <label for="settingsImapIndexer">Indexing Method</label>
+
+
+                <select id="settingsImapIndexer" class="custom-select custom-select-sm" name="imapIndexer" {{#if
+                    errors.imapIndexer}}is-invalid{{/if}}>
+                    {{#each imapIndexers}}
+                    <option value="{{id}}" {{#if selected}}selected{{/if}}>{{name}}</option>
+                    {{/each}}
+                </select>
+
+
+                {{#if errors.imapIndexer}}
+                <span class="invalid-feedback">{{errors.imapIndexer}}</span>
+                {{/if}}
+                <small class="form-text text-muted"><strong>Full:</strong> Track all changes (new, deleted, updated
+                    emails). <strong>Fast:</strong> Track only new emails. Applies to new accounts only. To change
+                    existing accounts, perform an <a href="/admin/swagger#/Account/putV1AccountAccountFlush">account
+                        flush</a>.</small>
+            </div>
+
+        </div>
+    </div>
+
+    <div id="export_settings" class="card mb-4">
+        <div class="card-header py-3">
+            <h6 class="m-0 font-weight-bold text-primary">Export Settings</h6>
+        </div>
+        <div class="card-body">
+            <p>Configure batch sizes for bulk message export operations.</p>
+
+            <div class="form-group">
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">gmailExportBatchSize</a>]</div>
+                <label for="settingsGmailExportBatchSize">Gmail Export Batch Size</label>
+                <input type="number" min="1" max="50" class="form-control {{#if errors.gmailExportBatchSize}}is-invalid{{/if}}"
+                    id="settingsGmailExportBatchSize" name="gmailExportBatchSize" value="{{values.gmailExportBatchSize}}"
+                    data-lpignore="true" autocomplete="off" />
+                {{#if errors.gmailExportBatchSize}}
+                <span class="invalid-feedback">{{errors.gmailExportBatchSize}}</span>
+                {{/if}}
+                <small class="form-text text-muted">Number of parallel requests when fetching Gmail messages for export (1-50, default: 10).</small>
+            </div>
+
+            <div class="form-group">
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">outlookExportBatchSize</a>]</div>
+                <label for="settingsOutlookExportBatchSize">Outlook Export Batch Size</label>
+                <input type="number" min="1" max="20" class="form-control {{#if errors.outlookExportBatchSize}}is-invalid{{/if}}"
+                    id="settingsOutlookExportBatchSize" name="outlookExportBatchSize" value="{{values.outlookExportBatchSize}}"
+                    data-lpignore="true" autocomplete="off" />
+                {{#if errors.outlookExportBatchSize}}
+                <span class="invalid-feedback">{{errors.outlookExportBatchSize}}</span>
+                {{/if}}
+                <small class="form-text text-muted">Messages per batch request for Outlook exports (1-20, default: 20). Limited by Microsoft Graph API.</small>
+            </div>
+        </div>
+    </div>
+
     <div id="templates_settings" class="card mb-4">
         <div class="card-header py-3 d-flex flex-row align-items-center justify-content-between">
-            <h6 class="m-0 font-weight-bold text-primary">Templates</h6>
+            <h6 class="m-0 font-weight-bold text-primary">Public Page Customization</h6>
             <div class="dropdown no-arrow">
                 <a class="dropdown-toggle" href="#" role="button" id="dropdownMenuLink" data-toggle="dropdown"
                     aria-haspopup="true" aria-expanded="false">
@@ -277,7 +386,7 @@
                 </a>
                 <div class="dropdown-menu dropdown-menu-right shadow animated--fade-in"
                     aria-labelledby="dropdownMenuLink">
-                    <div class="dropdown-header">Template actions:</div>
+                    <div class="dropdown-header">Actions:</div>
                     <a class="dropdown-item" href="#" id="preview-header-btn">
                         <i class="fas fa-eye fa-sm"></i> <span>Preview</span>
                     </a>
@@ -286,20 +395,36 @@
         </div>
         <div class="card-body">
 
+            <p>Customize public pages like authentication forms, error pages, and unsubscribe pages.</p>
+
+            <div class="form-group">
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">pageBrandName</a>]</div>
+
+                <label for="settingsPageBrandName">Brand Name</label>
+                <input type="text" class="form-control {{#if errors.pageBrandName}}is-invalid{{/if}}"
+                    id="settingsPageBrandName" name="pageBrandName" value="{{values.pageBrandName}}"
+                    data-lpignore="true" autocomplete="off" placeholder="EmailEngine" />
+                {{#if errors.pageBrandName}}
+                <span class="invalid-feedback">{{errors.pageBrandName}}</span>
+                {{/if}}
+                <small class="form-text text-muted">Appears in browser title bar</small>
+            </div>
+
             <div class="form-group">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">templateHeader</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">templateHeader</a>]</div>
 
-                <label>Template header for public pages (HTML code)</label>
+                <label>Page Header HTML</label>
 
-                <input type="hidden" class="{{#if errors.templateHeaderElement}}is-invalid{{/if}}"
-                    id="templateHeaderElement" name="templateHeader" value="{{values.templateHeader}}">
+                <input type="hidden" class="{{#if errors.templateHeader}}is-invalid{{/if}}" id="templateHeaderElement"
+                    name="templateHeader" value="{{values.templateHeader}}">
 
                 <div id="editor-html" class="code-editor"></div>
                 <div class="editor-embed-block">
                     <div class="editor-embed-content editor-embed-content-left">
-                        HTML content
+                        Header template
                     </div>
                     <div class="editor-embed-content editor-embed-content-right">
                         <a href="#" class="toggle-fullscreen" data-target="editor-html">Toggle fullscreen</a>
@@ -310,10 +435,37 @@
                 <span class="invalid-feedback">{{errors.templateHeader}}</span>
                 {{/if}}
 
-                <small class="form-text text-muted">Insert here the HTML code you want to display <u
-                        data-toggle="popover" data-trigger="hover" data-html="true"
+                <small class="form-text text-muted">HTML shown at the <u data-toggle="popover" data-trigger="hover"
+                        data-html="true"
                         data-content="&#x3C;img src=&#x22;/static/preview/header-template.png&#x22;&#x3E;"
-                        style="cursor: default;">on top of public pages</u> like the hosted authentication form.</small>
+                        style="cursor: default;">top of public pages</u></small>
+            </div>
+
+            <div class="form-group">
+
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">templateHtmlHead</a>]</div>
+
+                <label>Custom &lt;head&gt; HTML</label>
+
+                <input type="hidden" class="{{#if errors.templateHtmlHead}}is-invalid{{/if}}"
+                    id="templateHtmlHeadElement" name="templateHtmlHead" value="{{values.templateHtmlHead}}">
+
+                <div id="editor-html-head" class="code-editor"></div>
+                <div class="editor-embed-block">
+                    <div class="editor-embed-content editor-embed-content-left">
+                        Head content
+                    </div>
+                    <div class="editor-embed-content editor-embed-content-right">
+                        <a href="#" class="toggle-fullscreen" data-target="editor-html-head">Toggle fullscreen</a>
+                    </div>
+                </div>
+
+                {{#if errors.templateHtmlHead}}
+                <span class="invalid-feedback">{{errors.templateHtmlHead}}</span>
+                {{/if}}
+
+                <small class="form-text text-muted">Add custom CSS, fonts, or analytics scripts</small>
             </div>
 
         </div>
@@ -321,20 +473,19 @@
 
     <div id="templates_settings" class="card mb-4">
         <div class="card-header py-3">
-            <h6 class="m-0 font-weight-bold text-primary">Pre-processing scripts</h6>
+            <h6 class="m-0 font-weight-bold text-primary">Webhook Scripts</h6>
         </div>
         <div class="card-body">
 
 
-            <p>The following options apply for pre-processing scripts like the filter and map function of the webhook
-                routes and document store settings.</p>
+            <p>Global settings for filter and map functions in <a href="/admin/webhooks">webhook routes</a>.</p>
 
-            <div class="form-group">
+            <div class="form-group" id="scriptEnv">
 
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">scriptEnv</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">scriptEnv</a>]</div>
 
-                <label>Environment variable (JSON object)</label>
+                <label>Script Variables (JSON)</label>
 
                 <input type="hidden" class="{{#if errors.scriptEnv}}is-invalid{{/if}}" id="scriptEnvElement"
                     name="scriptEnv" value="{{values.scriptEnv}}">
@@ -342,7 +493,7 @@
                 <div id="editor-env" class="code-editor"></div>
                 <div class="editor-embed-block">
                     <div class="editor-embed-content editor-embed-content-left">
-                        JSON content
+                        Global variables
                     </div>
                     <div class="editor-embed-content editor-embed-content-right">
                         <a href="#" class="toggle-fullscreen" data-target="editor-env">Toggle fullscreen</a>
@@ -353,54 +504,76 @@
                 <span class="invalid-feedback">{{errors.scriptEnv}}</span>
                 {{/if}}
 
-                <small class="form-text text-muted">You can set here a JSON object that is used as the value of
-                    <code>env</code> variable in all pre-processing scripts.</small>
+                <small class="form-text text-muted">JSON object available as <code>env</code> variable in all filter and map functions. Use for shared secrets like API keys, access tokens, or configuration values. For example, if set to <code>{"token":"secret123"}</code>, then <code>env.token</code> in your scripts returns <code>"secret123"</code>.</small>
             </div>
 
         </div>
     </div>
 
-    <div class="card mb-4" id="labs">
+    <div id="labs"></div>
+
+    <div class="card mb-4" id="tracking">
         <div class="card-header py-3">
-            <h6 class="m-0 font-weight-bold text-primary">Labs <span class="badge badge-dark">beta</span></h6>
+            <h6 class="m-0 font-weight-bold text-primary">Email Tracking</h6>
         </div>
         <div class="card-body">
 
-            <p>The following options are not well tested and might change in the futurue. Use these with care.</p>
-
             <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">trackSentMessages</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">trackClicks</a>]</div>
 
-                <input type="checkbox" class="form-check-input {{#if errors.trackSentMessages}}is-invalid{{/if}}"
-                    id="trackSentMessages" name="trackSentMessages" {{#if values.trackSentMessages}}checked{{/if}} />
-                <label class="form-check-label" for="trackSentMessages">Track opens and clicks</label>
-                {{#if errors.trackSentMessages}}
-                <span class="invalid-feedback">{{errors.trackSentMessages}}</span>
+                <input type="checkbox" class="form-check-input {{#if errors.trackClicks}}is-invalid{{/if}}"
+                    id="trackClicks" name="trackClicks" {{#if values.trackClicks}}checked{{/if}} />
+                <label class="form-check-label" for="trackClicks">Track Link Clicks</label>
+                {{#if errors.trackClicks}}
+                <span class="invalid-feedback">{{errors.trackClicks}}</span>
                 {{/if}}
-                <small class="form-text text-muted">If enabled, then EmailEngine rewrites HTML links in emails sent
-                    through EmailEngine to track opens and clicks. You can also set this in the message level to
-                    override the default. See the <a href="https://emailengine.app/sending-emails#tracking"
-                        target="_blank" referrerpolicy="{{referrerPolicy}}">documentation</a> for details.<br />
-                    <strong>NB!</strong> <a href="{{values.serviceUrl}}" target="_blank">{{values.serviceUrl}}</a> must
-                    be publicly accessible for tracking to work.</small>
+                <small class="form-text text-muted">Rewrite links to track when recipients click them.</small>
             </div>
 
             <div class="form-group form-check">
-                <div class="text-muted float-right code-link">[<a href="/admin/iframe/docs#/Settings/postV1Settings"
-                        target="_blank">resolveGmailCategories</a>]</div>
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">trackOpens</a>]</div>
+
+                <input type="checkbox" class="form-check-input {{#if errors.trackOpens}}is-invalid{{/if}}"
+                    id="trackOpens" name="trackOpens" {{#if values.trackOpens}}checked{{/if}} />
+                <label class="form-check-label" for="trackOpens">Track Email Opens</label>
+                {{#if errors.trackOpens}}
+                <span class="invalid-feedback">{{errors.trackOpens}}</span>
+                {{/if}}
+                <small class="form-text text-muted">Add a tracking pixel to detect when emails are opened.</small>
+            </div>
+        </div>
+
+        <div class="card-footer">
+            <strong>Important:</strong> <a href="{{values.serviceUrl}}" target="_blank"
+                rel="noopener noreferrer">{{values.serviceUrl}}</a> must be publicly accessible for tracking to work.
+            See <a href="https://emailengine.app/sending-emails#tracking" target="_blank" rel="noopener noreferrer"
+                referrerpolicy="no-referrer">documentation</a> for per-message overrides.
+
+        </div>
+    </div>
+
+    <div class="card mb-4" id="gmail">
+        <div class="card-header py-3">
+            <h6 class="m-0 font-weight-bold text-primary">Gmail Features</h6>
+        </div>
+        <div class="card-body">
+
+            <div class="form-group form-check">
+                <div class="text-muted float-right code-link">[<a href="/admin/swagger#/Settings/postV1Settings"
+                        target="_blank" rel="noopener noreferrer">resolveGmailCategories</a>]</div>
 
                 <input type="checkbox" class="form-check-input {{#if errors.resolveGmailCategories}}is-invalid{{/if}}"
                     id="resolveGmailCategories" name="resolveGmailCategories" {{#if
                     values.resolveGmailCategories}}checked{{/if}} />
-                <label class="form-check-label" for="resolveGmailCategories">Resolve Gmail categories</label>
+                <label class="form-check-label" for="resolveGmailCategories">Detect Gmail Categories (IMAP)</label>
                 {{#if errors.resolveGmailCategories}}
                 <span class="invalid-feedback">{{errors.resolveGmailCategories}}</span>
                 {{/if}}
-                <small class="form-text text-muted">If enabled, EmailEngine resolves the inbox category (also known as
-                    the Gmail tab) for incoming emails. Possible category values are the following: <em>social</em>,
-                    <em>promotions</em>, <em>updates</em>, <em>forums</em>, and <em>primary</em>. You can find the value
-                    in the <em>category</em> property of the <em>messageNew</em> webhook payload.</small>
+                <small class="form-text text-muted">Identify which Gmail tab (Primary, Social, Promotions, Updates,
+                    Forums) new emails belong to. Available in <code>messageNew</code> webhook as <code>category</code>
+                    property. Gmail API accounts get this automatically.</small>
             </div>
 
         </div>
@@ -411,7 +584,7 @@
             <span class="icon text-white-50">
                 <i class="fas fa-cog"></i>
             </span>
-            <span class="text">Update settings</span>
+            <span class="text">Save Changes</span>
         </button>
     </div>
 
@@ -420,6 +593,8 @@
 <form id="preview-form" method="post" action="/admin/config/service/preview">
     <input type="hidden" name="crumb" value="{{crumb}}" />
     <input type="hidden" name="templateHeader" id="preview-header-elm">
+    <input type="hidden" name="templateHtmlHead" id="preview-head-elm">
+    <input type="hidden" name="pageBrandName" id="preview-brand-name-elm">
 </form>
 
 
@@ -485,14 +660,7 @@
         });
 
 
-        document.getElementById('preview-header-btn').addEventListener('click', e => {
-            e.preventDefault();
-            let previewWindow = window.open('about:blank', 'preview-window', '');
-            let previewForm = document.getElementById('preview-form');
-            previewForm.target = 'preview-window';
-            document.getElementById('preview-header-elm').value = editorHtml.getValue();
-            previewForm.submit();
-        });
+
 
 
         const editors = new Map();
@@ -521,9 +689,36 @@
         editorEnv.session.setMode("ace/mode/json");
         editorEnv.session.setValue(document.getElementById('scriptEnvElement').value);
 
+        const editorHtmlHead = ace.edit("editor-html-head", {
+            enableBasicAutocompletion: true,
+            enableSnippets: false,
+            enableLiveAutocompletion: false,
+            useWorker: true
+        });
+        editors.set("editor-html-head", editorHtmlHead);
+
+        editorHtmlHead.setTheme("ace/theme/xcode");
+        editorHtmlHead.session.setMode("ace/mode/handlebars");
+        editorHtmlHead.session.setValue(document.getElementById('templateHtmlHeadElement').value);
+
+
+        document.getElementById('preview-header-btn').addEventListener('click', e => {
+            e.preventDefault();
+            let previewWindow = window.open('about:blank', 'preview-window', '');
+            let previewForm = document.getElementById('preview-form');
+            previewForm.target = 'preview-window';
+
+            document.getElementById('preview-brand-name-elm').value = document.getElementById('settingsPageBrandName').value;
+            document.getElementById('preview-header-elm').value = editorHtml.getValue();
+            document.getElementById('preview-head-elm').value = editorHtmlHead.getValue();
+
+            previewForm.submit();
+        });
+
         document.getElementById('settings-form').addEventListener('submit', () => {
             document.getElementById('templateHeaderElement').value = editorHtml.getValue();
             document.getElementById('scriptEnvElement').value = editorEnv.getValue();
+            document.getElementById('templateHtmlHeadElement').value = editorHtmlHead.getValue();
         });
 
         for (let toggleElm of document.querySelectorAll('.toggle-fullscreen')) {

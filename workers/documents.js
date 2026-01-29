@@ -46,13 +46,13 @@ const {
     MESSAGE_NEW_NOTIFY,
     MESSAGE_DELETED_NOTIFY,
     MESSAGE_UPDATED_NOTIFY,
-    ACCOUNT_DELETED,
+    ACCOUNT_DELETED_NOTIFY,
     EMAIL_BOUNCE_NOTIFY,
     MAILBOX_DELETED_NOTIFY,
     REDIS_PREFIX
 } = require('../lib/consts');
 
-const config = require('wild-config');
+const config = require('@zone-eu/wild-config');
 config.service = config.service || {};
 
 const DEFAULT_EENGINE_TIMEOUT = 10 * 1000;
@@ -117,6 +117,18 @@ async function onCommand(command) {
     }
 }
 
+// Start sending heartbeats to main thread
+setInterval(() => {
+    try {
+        parentPort.postMessage({ cmd: 'heartbeat' });
+    } catch (err) {
+        // Ignore errors, parent might be shutting down
+    }
+}, 10 * 1000).unref();
+
+// Send initial ready signal
+parentPort.postMessage({ cmd: 'ready' });
+
 parentPort.on('message', message => {
     if (message && message.cmd === 'resp' && message.mid && callQueue.has(message.mid)) {
         let { resolve, reject, timer } = callQueue.get(message.mid);
@@ -166,7 +178,7 @@ const documentsWorker = new Worker(
         const tombstoneYdy = `${REDIS_PREFIX}tomb:${job.data.account}:${dateKeyYdy}`;
 
         switch (job.data.event) {
-            case ACCOUNT_DELETED:
+            case ACCOUNT_DELETED_NOTIFY:
                 {
                     const { index, client } = await getESClient(logger);
                     if (!client) {
@@ -289,7 +301,7 @@ const documentsWorker = new Worker(
 
             // returns indexing response for the parent job
             case MESSAGE_NEW_NOTIFY: {
-                let accountExists = await redis.exists(`${REDIS_PREFIX}iad:${job.data.account}`);
+                let accountExists = await redis.hexists(`${REDIS_PREFIX}iad:${job.data.account}`, 'account');
                 if (!accountExists) {
                     // deleted account?
                     return false;
@@ -698,7 +710,7 @@ const documentsWorker = new Worker(
                     let messageData = job.data.data;
                     let messageId = messageData.id;
 
-                    let accountExists = await redis.exists(`${REDIS_PREFIX}iad:${job.data.account}`);
+                    let accountExists = await redis.hexists(`${REDIS_PREFIX}iad:${job.data.account}`, 'account');
                     if (!accountExists) {
                         // deleted account?
                         return;
@@ -805,7 +817,7 @@ ${Object.keys(params)
                         return;
                     }
 
-                    let accountExists = await redis.exists(`${REDIS_PREFIX}iad:${job.data.account}`);
+                    let accountExists = await redis.hexists(`${REDIS_PREFIX}iad:${job.data.account}`, 'account');
                     if (!accountExists) {
                         // deleted account?
                         return;
@@ -900,6 +912,7 @@ if( ctx._source.bounces != null) {
     Object.assign(
         {
             concurrency: 1,
+            lockDuration: 2 * 60 * 1000, // 2 minutes for ES operations
             maxStalledCount: 5,
             stalledInterval: 60 * 1000
         },
@@ -990,6 +1003,10 @@ const clearExpungedEmbeddings = async () => {
                 };
 
                 const { index, client } = await getESClient(logger);
+                if (!client) {
+                    // Document store not enabled
+                    return;
+                }
 
                 let existingResult;
                 try {

@@ -1,12 +1,15 @@
 'use strict';
 
+// NB! This file is processed by gettext parser and can not use newer syntax like ?.
+
 const { parentPort } = require('worker_threads');
 
 const packageData = require('../package.json');
-const config = require('wild-config');
+const config = require('@zone-eu/wild-config');
 const logger = require('../lib/logger');
 const Path = require('path');
-const { loadTranslations, gt, joiLocales } = require('../lib/translations');
+const Gettext = require('@postalsys/gettext');
+const { loadTranslations, gt, joiLocales, locales } = require('../lib/translations');
 const util = require('util');
 const { webhooks: Webhooks } = require('../lib/webhooks');
 const featureFlags = require('../lib/feature-flags');
@@ -31,14 +34,14 @@ const {
     runPrechecks,
     matcher,
     readEnvValue,
-    matchIp,
     getSignedFormData,
     threadStats,
-    detectAutomatedRequest,
     hasEnvValue,
     getBoolean,
-    loadTlsConfig
+    loadTlsConfig,
+    retryAgent
 } = require('../lib/tools');
+const { matchIp, detectAutomatedRequest } = require('../lib/utils/network');
 
 const Bugsnag = require('@bugsnag/js');
 if (readEnvValue('BUGSNAG_API_KEY')) {
@@ -71,6 +74,7 @@ const Joi = require('joi');
 const hapiPino = require('hapi-pino');
 const Inert = require('@hapi/inert');
 const Vision = require('@hapi/vision');
+const Accept = require('@hapi/accept');
 const HapiSwagger = require('hapi-swagger');
 
 const pathlib = require('path');
@@ -84,13 +88,11 @@ const AuthBearer = require('hapi-auth-bearer-token');
 const tokens = require('../lib/tokens');
 const { autodetectImapSettings } = require('../lib/autodetect-imap-settings');
 
-const Hecks = require('@postalsys/hecks');
-const { arenaExpress } = require('../lib/arena-express');
 const outbox = require('../lib/outbox');
 
 const { lists } = require('../lib/lists');
 
-const { redis, REDIS_CONF, documentsQueue, notifyQueue, submitQueue } = require('../lib/db');
+const { redis, documentsQueue, notifyQueue, submitQueue } = require('../lib/db');
 const { Account } = require('../lib/account');
 const { Gateway } = require('../lib/gateway');
 const settings = require('../lib/settings');
@@ -115,51 +117,71 @@ const {
     TLS_RENEW_CHECK_INTERVAL,
     DEFAULT_CORS_MAX_AGE,
     LIST_UNSUBSCRIBE_NOTIFY,
-    FETCH_TIMEOUT,
     DEFAULT_MAX_BODY_SIZE,
+    DEFAULT_MAX_PAYLOAD_TIMEOUT,
     DEFAULT_EENGINE_TIMEOUT,
     DEFAULT_MAX_ATTACHMENT_SIZE,
     MAX_FORM_TTL,
     NONCE_BYTES
 } = consts;
 
-const { fetch: fetchCmd, Agent } = require('undici');
-const fetchAgent = new Agent({ connect: { timeout: FETCH_TIMEOUT } });
+const { fetch: fetchCmd } = require('undici');
 
 const templateRoutes = require('../lib/api-routes/template-routes');
 const chatRoutes = require('../lib/api-routes/chat-routes');
+const bullBoardRoutes = require('../lib/api-routes/bull-board-routes');
+const accountRoutes = require('../lib/api-routes/account-routes');
+const messageRoutes = require('../lib/api-routes/message-routes');
+const exportRoutes = require('../lib/api-routes/export-routes');
 
 const {
     settingsSchema,
     addressSchema,
     settingsQuerySchema,
     imapSchema,
-    imapUpdateSchema,
     smtpSchema,
-    smtpUpdateSchema,
     oauth2Schema,
-    oauth2UpdateSchema,
-    messageDetailsSchema,
-    messageListSchema,
     mailboxesSchema,
     shortMailboxesSchema,
     licenseSchema,
     lastErrorSchema,
     templateSchemas,
-    documentStoreSchema,
-    searchSchema,
-    messageUpdateSchema,
     accountSchemas,
     oauthCreateSchema,
     tokenRestrictionsSchema,
     accountIdSchema,
     ipSchema,
-    accountCountersSchema
+    accountPathSchema,
+    defaultAccountTypeSchema,
+    fromAddressSchema,
+    outboxEntrySchema,
+    googleProjectIdSchema,
+    googleWorkspaceAccountsSchema,
+    googleTopicNameSchema,
+    googleSubscriptionNameSchema,
+    messageReferenceSchema,
+    idempotencyKeySchema,
+    headerTimeoutSchema
 } = require('../lib/schemas');
+
+const OAuth2ProviderSchema = Joi.string()
+    .valid(...Object.keys(OAUTH_PROVIDERS))
+    .required()
+    .example('gmail')
+    .description('OAuth2 provider')
+    .label('OAuth2Provider');
+
+const AccountTypeSchema = Joi.string()
+    .valid(...['imap'].concat(Object.keys(OAUTH_PROVIDERS)).concat('oauth2'))
+    .example('outlook')
+    .description('Account type')
+    .required()
+    .label('AccountType');
+
+const SUPPORTED_LOCALES = locales.map(locale => locale.locale);
 
 const FLAG_SORT_ORDER = ['\\Inbox', '\\Flagged', '\\Sent', '\\Drafts', '\\All', '\\Archive', '\\Junk', '\\Trash'];
 
-const { OUTLOOK_SCOPES } = require('../lib/oauth/outlook');
 const { GMAIL_SCOPES } = require('../lib/oauth/gmail');
 const { MAIL_RU_SCOPES } = require('../lib/oauth/mail-ru');
 
@@ -196,11 +218,21 @@ const API_TLS = hasEnvValue('EENGINE_API_TLS') ? getBoolean(readEnvValue('EENGIN
 // Merge TLS settings from config params and environment
 loadTlsConfig(API_TLS, 'EENGINE_API_TLS_');
 
+const ADMIN_ACCESS_ADDRESSES = hasEnvValue('EENGINE_ADMIN_ACCESS_ADDRESSES')
+    ? readEnvValue('EENGINE_ADMIN_ACCESS_ADDRESSES')
+          .split(',')
+          .map(v => v.trim())
+          .filter(v => v)
+    : null;
+
 const IMAP_WORKER_COUNT = getWorkerCount(readEnvValue('EENGINE_WORKERS') || (config.workers && config.workers.imap)) || 4;
 
 // Max POST body size for message uploads
 // NB! the default for other requests is 1MB
 const MAX_BODY_SIZE = getByteSize(readEnvValue('EENGINE_MAX_BODY_SIZE') || config.api.maxBodySize) || DEFAULT_MAX_BODY_SIZE;
+
+// Payload reception timeout in milliseconds for message upload requests
+const MAX_PAYLOAD_TIMEOUT = getDuration(readEnvValue('EENGINE_MAX_PAYLOAD_TIMEOUT') || config.api.maxPayloadTimeout) || DEFAULT_MAX_PAYLOAD_TIMEOUT;
 
 // CORS configuration for API requests
 // By default, CORS is not enabled
@@ -230,7 +262,20 @@ const CORS_CONFIG = !CORS_ORIGINS
           credentials: true
       };
 
-logger.debug({ msg: 'CORS config for API requests', cors: CORS_CONFIG });
+logger.info({
+    msg: 'API server configuration',
+    api: {
+        port: API_PORT,
+        host: API_HOST,
+        maxPayloadTimeout: MAX_PAYLOAD_TIMEOUT,
+        maxBodySize: MAX_BODY_SIZE,
+        maxSize: MAX_ATTACHMENT_SIZE
+    },
+    service: {
+        commandTimeout: EENGINE_TIMEOUT
+    },
+    cors: CORS_CONFIG
+});
 
 const TRACKER_IMAGE = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
 
@@ -242,11 +287,19 @@ class ResponseStream extends Transform {
         registeredPublishers.add(this);
         this.periodicKeepAliveTimer = false;
         this.updateTimer();
+
+        this._finalized = false;
+
+        // Ensure cleanup on all stream end scenarios
+        this.on('error', () => this.finalize());
+        this.once('close', () => this.finalize());
+        this.once('end', () => this.finalize());
     }
 
     updateTimer() {
         clearTimeout(this.periodicKeepAliveTimer);
         this.periodicKeepAliveTimer = setTimeout(() => {
+            if (this._finalized || this.destroyed) return;
             this.write(': still here\n\n');
             if (this._compressor) {
                 this._compressor.flush();
@@ -261,6 +314,7 @@ class ResponseStream extends Transform {
     }
 
     sendMessage(payload) {
+        if (this._finalized || this.destroyed) return;
         let sendData = JSON.stringify(payload);
         this.write('event: message\ndata:' + sendData + '\n\n');
         if (this._compressor) {
@@ -270,8 +324,15 @@ class ResponseStream extends Transform {
     }
 
     finalize() {
+        if (this._finalized) return; // Prevent double cleanup
+        this._finalized = true;
+
         clearTimeout(this.periodicKeepAliveTimer);
         registeredPublishers.delete(this);
+
+        if (!this.destroyed) {
+            this.destroy();
+        }
     }
 
     _transform(data, encoding, done) {
@@ -350,7 +411,7 @@ async function sendWebhook(account, event, data) {
         event
     });
 
-    let serviceUrl = (await settings.get('serviceUrl')) || true;
+    let serviceUrl = (await settings.get('serviceUrl')) || null;
 
     let payload = {
         serviceUrl,
@@ -396,6 +457,7 @@ parentPort.on('message', message => {
         let { resolve, reject, timer } = callQueue.get(message.mid);
         clearTimeout(timer);
         callQueue.delete(message.mid);
+
         if (message.error) {
             let err = new Error(message.error);
             if (message.code) {
@@ -407,6 +469,7 @@ parentPort.on('message', message => {
             if (message.info) {
                 err.info = message.info;
             }
+
             return reject(err);
         } else {
             return resolve(message.response);
@@ -445,7 +508,12 @@ const init = async () => {
 
     handlebars.registerHelper('_', (...args) => {
         let params = args.slice(1, args.length - 1);
-        let translated = gt.gettext(args[0]);
+
+        let locale = params.shift();
+
+        let localGt = locale ? gt.useLocale(locale) : gt;
+
+        let translated = localGt.gettext(args[0]);
         if (params.length) {
             translated = util.format(translated, ...params);
         }
@@ -453,23 +521,61 @@ const init = async () => {
         return new handlebars.SafeString(translated);
     });
 
+    handlebars.registerHelper('isodate', time => new Date(Number(time)).toISOString());
+
     handlebars.registerHelper('ngettext', (msgid, plural, count) => util.format(gt.ngettext(msgid, plural, count), count));
 
     handlebars.registerHelper('featureFlag', function (flag, options) {
         if (featureFlags.enabled(flag)) {
-            return options.fn(this); // eslint-disable-line no-invalid-this
+            return options.fn(this);
         }
-        return options.inverse(this); // eslint-disable-line no-invalid-this
+        return options.inverse(this);
     });
 
     handlebars.registerHelper('equals', function (compareVal, baseVal, options) {
         if (baseVal === compareVal) {
-            return options.fn(this); // eslint-disable-line no-invalid-this
+            return options.fn(this);
         }
-        return options.inverse(this); // eslint-disable-line no-invalid-this
+        return options.inverse(this);
     });
 
     handlebars.registerHelper('inc', (nr, inc) => Number(nr) + Number(inc));
+
+    handlebars.registerHelper('json', payload => {
+        let res;
+        try {
+            res = typeof payload === 'undefined' ? 'undefined' : JSON.stringify(payload, false, 2);
+        } catch (err) {
+            res = util.inspect(payload, false, 4, false);
+        }
+        return new handlebars.SafeString(res);
+    });
+
+    handlebars.registerHelper('lastVal', (value, separator) => {
+        separator = separator || '/';
+
+        let res = (value || '').toString().split(separator).pop();
+
+        return new handlebars.SafeString(res);
+    });
+
+    handlebars.registerHelper('formatInteger', (intVal, locale) => {
+        if (isNaN(intVal)) {
+            // ignore non-numbers
+            return intVal;
+        }
+
+        locale = (locale || 'en_US').replace(/_/g, '-');
+
+        let formatter;
+        try {
+            formatter = new Intl.NumberFormat(locale, {});
+        } catch (err) {
+            formatter = new Intl.NumberFormat('en-US', {});
+        }
+
+        return formatter.format(intVal);
+    });
 
     const server = Hapi.server({
         port: API_PORT,
@@ -487,16 +593,13 @@ const init = async () => {
             validate: {
                 options: {
                     messages: joiLocales,
-                    convert: true
+                    convert: true,
+                    errors: {
+                        language: 'en' // Default language
+                    }
                 },
                 headers: Joi.object({
-                    'x-ee-timeout': Joi.number()
-                        .integer()
-                        .min(0)
-                        .max(2 * 3600 * 1000)
-                        .optional()
-                        .description(`Override the \`EENGINE_TIMEOUT\` environment variable for a single API request (in milliseconds)`)
-                        .label('X-EE-Timeout')
+                    'x-ee-timeout': headerTimeoutSchema
                 }).unknown()
             }
         }
@@ -507,7 +610,15 @@ const init = async () => {
 
     let getServiceDomain = async () => {
         let serviceUrl = await settings.get('serviceUrl');
-        let hostname = (new URL(serviceUrl).hostname || '').toString().toLowerCase().trim();
+        let parsedUrl;
+
+        try {
+            parsedUrl = new URL(serviceUrl);
+        } catch (err) {
+            parsedUrl = {};
+        }
+
+        let hostname = (parsedUrl.hostname || '').toString().toLowerCase().trim();
         if (!hostname || net.isIP(hostname) || ['localhost'].includes(hostname) || /(\.local|\.lan)$/i.test(hostname)) {
             return false;
         }
@@ -592,22 +703,97 @@ const init = async () => {
         return certificateData;
     });
 
-    server.ext('onPostAuth', async (request, h) => {
-        let defaultLocale = (await settings.get('locale')) || 'en';
+    server.ext('onPreAuth', async (request, h) => {
+        const tags = (request.route && request.route.settings && request.route.settings.tags) || [];
+        // Skip if it's a static file route
+        if (tags.includes('static')) {
+            return h.continue;
+        }
+
+        const defaultLocale = (await settings.get('locale')) || 'en';
         if (defaultLocale && gt.locale !== defaultLocale) {
             gt.setLocale(defaultLocale);
         }
 
-        if (joiLocales[defaultLocale] && request.route.settings.validate.options) {
-            if (!request.route.settings.validate.options.errors) {
-                request.route.settings.validate.options.errors = {};
-            }
-            request.route.settings.validate.options.errors.language = defaultLocale;
+        let detectedLocale = defaultLocale;
+        let updateLocaleCookie;
+        // Priority order:
+        // 1. Query parameter (?locale=nl)
+        if (request.query.locale && SUPPORTED_LOCALES.includes(request.query.locale)) {
+            detectedLocale = request.query.locale;
+            updateLocaleCookie = detectedLocale;
         }
+        // 2. Custom header (X-EE-Locale: nl)
+        else if (request.headers['x-ee-locale'] && SUPPORTED_LOCALES.includes(request.headers['x-ee-locale'])) {
+            detectedLocale = request.headers['x-ee-locale'];
+            updateLocaleCookie = detectedLocale;
+        }
+        // 3. Use the locale store in cookie
+        else if (request.state && request.state.locale && request.state.locale.locale) {
+            detectedLocale = request.state && request.state.locale && request.state.locale.locale;
+        }
+        // 4. Accept-Language header negotiation
+        else if (request.headers['accept-language']) {
+            try {
+                detectedLocale = Accept.language(request.headers['accept-language'], SUPPORTED_LOCALES);
+            } catch (err) {
+                // Keep default locale on parse error
+                request.logger.debug({
+                    msg: 'Accept-Language parse error',
+                    err,
+                    header: request.headers['accept-language']
+                });
+            }
+        }
+        // 5. If still no match, keep the default
+
+        // Save selected locale in a cookie for UI requests
+        // Only use the value from query argument or custom header, not from Accept-Language header
+
+        if (
+            updateLocaleCookie &&
+            (!request.state || !request.state.locale || updateLocaleCookie !== request.state.locale.locale) &&
+            // skip API paths
+            !request.route.path.startsWith('/v1/') &&
+            !request.route.path.startsWith('/health')
+        ) {
+            // set locale cookie
+            h.state('locale', { locale: detectedLocale });
+        }
+
+        // Set the locale for the request
+        const reqLocale = detectedLocale && Gettext.getLanguageCode(detectedLocale);
+        if (reqLocale && gt.catalogs.hasOwnProperty(reqLocale)) {
+            request.app.gt = gt.useLocale(reqLocale);
+            request.app.locale = reqLocale;
+        } else {
+            request.app.locale = defaultLocale;
+            request.app.gt = gt;
+        }
+
+        // Make sure validation errors use selected locale
+        if (request.route.settings.validate && request.route.settings.validate.options) {
+            // Get user's locale
+            const locale = request.app.locale || 'en';
+
+            // Create new validation options for this request
+            const validationOptions = Object.assign({}, request.route.settings.validate.options, {
+                errors: {
+                    language: locale
+                }
+            });
+
+            // Apply to this request only
+            request.route.settings.validate.options = validationOptions;
+        }
+
         return h.continue;
     });
 
     server.ext('onRequest', async (request, h) => {
+        // set default, will be overriden once active language is resolved
+        request.app.gt = gt;
+
         // check if client IP is resolved from X-Forwarded-For or not
         let enableApiProxy = (await settings.get('enableApiProxy')) || false;
         if (enableApiProxy) {
@@ -634,51 +820,216 @@ const init = async () => {
         // flash notifications
         request.flash = async message => await flash(redis, request, message);
 
+        if (ADMIN_ACCESS_ADDRESSES && ADMIN_ACCESS_ADDRESSES.length) {
+            if (request.path.startsWith('/admin') && !matchIp(request.app.ip, ADMIN_ACCESS_ADDRESSES)) {
+                logger.info({
+                    msg: 'Blocked access from unlisted IP address',
+                    remoteAddress: request.app.ip,
+                    allowedAddresses: ADMIN_ACCESS_ADDRESSES,
+                    component: 'api',
+                    req: {
+                        method: request.method,
+                        url: request.path,
+                        query: request.query
+                    }
+                });
+
+                return h
+                    .view(
+                        'error',
+                        {
+                            pageTitle: 'Access Denied',
+                            message: `You don't have permission to view this page`
+                        },
+                        {
+                            layout: 'public'
+                        }
+                    )
+                    .code(403)
+                    .takeover();
+            }
+        }
+
         return h.continue;
     });
 
     const swaggerOptions = {
         swaggerUI: true,
-        swaggerUIPath: '/admin/iframe/swagger/',
-        documentationPage: true,
-        documentationPath: '/admin/iframe/docs',
+        jsonPath: '/swagger.json',
+        swaggerUIPath: '/admin/swagger/resources/',
+
+        OAS: 'v3.0',
 
         expanded: 'list',
         sortEndpoints: 'method',
+        sortTags: 'unsorted',
+
         tryItOutEnabled: true,
 
         templates: Path.join(__dirname, '..', 'views', 'swagger', 'ui'),
 
         grouping: 'tags',
 
-        //auth: 'api-token',
-
         info: {
-            title: 'EmailEngine',
+            title: 'EmailEngine API',
             version: packageData.version,
-            contact: {
-                name: 'Postal Systems OÜ',
-                email: 'info@emailengine.app'
-            },
-            description: `You will need an Access Token to use this API (generate one <a href="/admin/tokens" target="_parent">here</a>).
 
-When making API calls remember that requests against the same account are queued and not executed in parallel. If a previous request takes too much time to finish, a queued request might time out before EmailEngine can run it.`
+            description: `EmailEngine provides a RESTful API for managing email accounts, sending messages, and processing email data across multiple providers.
+
+<h3>Authentication</h3>
+All API requests require authentication using an Access Token. You can generate and manage your tokens from the <a href="/admin/tokens" target="_parent"><strong>Access Tokens</strong></a> page.
+
+Include your token in requests using one of these methods:
+- Query parameter: <code>?access_token=YOUR_TOKEN</code>
+- Authorization header: <code>Authorization: Bearer YOUR_TOKEN</code>
+
+<h3>Request Processing</h3>
+
+<strong>Sequential Processing:</strong> Requests to the same email account are processed sequentially to maintain data consistency. Multiple simultaneous requests will be queued.
+
+<strong>Timeouts:</strong> Long-running operations may cause queued requests to timeout. Configure appropriate timeout values using the <code>X-EE-Timeout</code> header (in milliseconds).
+
+<h3>Getting Started</h3>
+1. <a href="/admin/tokens" target="_parent">Generate an Access Token</a>
+2. <a href="/admin/accounts" target="_parent">Add an email account</a>
+3. Start making API requests using the endpoints below`,
+
+            contact: {
+                name: 'EmailEngine Support',
+                url: 'https://emailengine.app/support',
+                email: 'support@emailengine.app'
+            },
+
+            license: {
+                name: 'EmailEngine License',
+                url: 'https://emailengine.dev/LICENSE_EMAILENGINE.txt'
+            }
+        },
+
+        externalDocs: {
+            description: 'EmailEngine Documentation',
+            url: 'https://emailengine.app/'
         },
 
         securityDefinitions: {
             bearerAuth: {
-                type: 'apiKey',
-                //scheme: 'bearer',
-                name: 'access_token',
-                in: 'query'
+                type: 'http',
+                scheme: 'bearer',
+                bearerFormat: 'JWT',
+                description: 'Enter your access token'
             }
         },
 
         security: [{ bearerAuth: [] }],
 
+        definitionPrefix: 'useLabel',
+
         cors: !!CORS_CONFIG,
         cache: {
             expiresIn: 7 * 24 * 60 * 60 * 1000
+        },
+
+        tags: [
+            {
+                name: 'Account',
+                description: 'Manage email accounts, including IMAP/SMTP configuration, OAuth2 authentication, and account health monitoring'
+            },
+            {
+                name: 'Mailbox',
+                description: 'List, create, modify, and manage mailbox folders. Retrieve folder statistics and special-use designations'
+            },
+            {
+                name: 'Message',
+                description: 'Search, retrieve, update, and delete email messages. Manage flags, labels, and message content'
+            },
+            {
+                name: 'Submit',
+                description:
+                    'Send emails with attachments, reply to threads, forward messages, and upload to folders. Supports both immediate and scheduled sending',
+                externalDocs: {
+                    description: 'Sending Emails Documentation',
+                    url: 'https://emailengine.app/sending-emails'
+                }
+            },
+            {
+                name: 'Outbox',
+                description: 'Monitor and manage the email sending queue. View pending messages, retry failed deliveries, and track sending progress'
+            },
+            {
+                name: 'Delivery Test',
+                description: 'Test email deliverability and authentication. Verify SPF, DKIM signatures, DMARC alignment, and analyze potential delivery issues'
+            },
+            {
+                name: 'Access Tokens',
+                description: 'Create and manage API access tokens with customizable permissions, IP restrictions, and rate limits'
+            },
+            {
+                name: 'Settings',
+                description: 'Configure EmailEngine runtime settings including webhooks, tracking, AI features, and email processing options'
+            },
+            {
+                name: 'Templates',
+                description: 'Create and manage reusable email templates with variable substitution, HTML/text content, and attachments',
+                externalDocs: {
+                    description: 'Email Templates Documentation',
+                    url: 'https://emailengine.app/email-templates'
+                }
+            },
+            {
+                name: 'Logs',
+                description: 'Access system and account-level logs for debugging, monitoring, and audit purposes'
+            },
+            {
+                name: 'Stats',
+                description: 'Retrieve usage statistics, performance metrics, and account activity data',
+                externalDocs: {
+                    description: 'Monitoring and Analytics',
+                    url: 'https://emailengine.app/monitoring'
+                }
+            },
+            {
+                name: 'License',
+                description: 'Manage EmailEngine licensing, view license status, and handle license-related operations'
+            },
+            {
+                name: 'Webhooks',
+                description: 'Configure webhook endpoints, manage event subscriptions, and monitor webhook delivery status',
+                externalDocs: {
+                    description: 'Webhooks Guide',
+                    url: 'https://emailengine.app/webhooks'
+                }
+            },
+            {
+                name: 'OAuth2 Applications',
+                description: 'Configure OAuth2 applications for Gmail, Outlook, and other providers. Manage client credentials and authentication flows',
+                externalDocs: {
+                    description: 'OAuth2 Configuration Guide',
+                    url: 'https://emailengine.app/oauth2-configuration'
+                }
+            },
+            {
+                name: 'SMTP Gateway',
+                description: 'Configure and manage the built-in SMTP server for receiving emails and integrating with external systems'
+            },
+            {
+                name: 'Blocklists',
+                description: 'Manage email address blocklists to prevent sending to specific recipients or domains'
+            },
+            {
+                name: 'Multi Message Actions',
+                description: 'Perform bulk operations on multiple messages simultaneously, such as marking as read, moving, or deleting'
+            },
+            {
+                name: 'Export (Beta)',
+                description:
+                    'Bulk export messages from email accounts. This feature is in beta and the API may change in future releases. Export files are encrypted at rest when a service secret is configured.'
+            }
+        ],
+
+        // Custom vendor extensions for additional metadata
+        'x-logo': {
+            url: 'https://emailengine.dev/static/logo.png',
+            altText: 'EmailEngine Logo'
         }
     };
 
@@ -710,6 +1061,23 @@ When making API calls remember that requests against the same account are queued
                 }
             }
 
+            if (token.startsWith('sess_') && scope === 'api') {
+                // seems like a session token
+                let isValidSessionToken = await tokens.validateSessionToken(
+                    request.state && request.state.ee && request.state.ee.sid,
+                    token,
+                    request.params.account,
+                    900
+                );
+                if (isValidSessionToken) {
+                    return {
+                        isValid: true,
+                        credentials: {},
+                        artifacts: {}
+                    };
+                }
+            }
+
             let tokenData;
             try {
                 tokenData = await tokens.get(token, false, { log: true, remoteAddress: request.app.ip });
@@ -738,7 +1106,44 @@ When making API calls remember that requests against the same account are queued
 
             if (tokenData.account) {
                 // account token
-                if (!request.params || request.params.account !== tokenData.account) {
+
+                let accountIdSource;
+
+                // allow specific routes that have an account component but not in the URL params section
+                switch (request.route.path) {
+                    case '/v1/templates':
+                        switch (request.method) {
+                            case 'get':
+                                accountIdSource = request.query && request.query.account;
+                                break;
+                        }
+                        break;
+
+                    case '/v1/templates/template/{template}': {
+                        let isAccountTemplate =
+                            request.params.template && (await redis.sismember(`${REDIS_PREFIX}tpl:${tokenData.account}:i`, request.params.template));
+                        if (isAccountTemplate) {
+                            accountIdSource = tokenData.account;
+                        }
+                        break;
+                    }
+
+                    case '/v1/templates/template': {
+                        switch (request.method) {
+                            case 'post':
+                                request.app.enforceAccount = tokenData.account;
+                                accountIdSource = tokenData.account;
+                                break;
+                        }
+                        break;
+                    }
+
+                    default:
+                        accountIdSource = request.params && request.params.account;
+                        break;
+                }
+
+                if (accountIdSource !== tokenData.account) {
                     logger.error({
                         msg: 'Trying to use invalid account for a token',
                         tokenAccount: tokenData.account,
@@ -830,6 +1235,13 @@ When making API calls remember that requests against the same account are queued
     } catch (err) {
         // skip
     }
+
+    server.state('locale', {
+        ttl: null,
+        encoding: 'base64json',
+        clearInvalid: true,
+        path: '/'
+    });
 
     // Authentication for admin pages
     server.auth.strategy('session', 'cookie', {
@@ -958,7 +1370,8 @@ When making API calls remember that requests against the same account are queued
     ]);
 
     server.events.on('response', request => {
-        if (!/^\/v1\//.test(request.route.path)) {
+        const tags = request.route && request.route.settings && request.route.settings.tags;
+        if (!tags || !tags.includes('api')) {
             // only log API calls
             return;
         }
@@ -993,7 +1406,8 @@ When making API calls remember that requests against the same account are queued
             file: { path: pathlib.join(__dirname, '..', 'static', 'favicon.ico'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1004,7 +1418,8 @@ When making API calls remember that requests against the same account are queued
             file: { path: pathlib.join(__dirname, '..', 'static', 'licenses.html'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1015,7 +1430,8 @@ When making API calls remember that requests against the same account are queued
             file: { path: pathlib.join(__dirname, '..', 'LICENSE_EMAILENGINE.txt'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1026,7 +1442,8 @@ When making API calls remember that requests against the same account are queued
             file: { path: pathlib.join(__dirname, '..', 'LICENSE_EMAILENGINE.txt'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1037,7 +1454,8 @@ When making API calls remember that requests against the same account are queued
             file: { path: pathlib.join(__dirname, '..', 'sbom.json'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1067,7 +1485,8 @@ When making API calls remember that requests against the same account are queued
             file: { path: pathlib.join(__dirname, '..', 'static', 'robots.txt'), confine: false }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1080,7 +1499,8 @@ When making API calls remember that requests against the same account are queued
             }
         },
         options: {
-            auth: false
+            auth: false,
+            tags: ['static']
         }
     });
 
@@ -1105,7 +1525,8 @@ When making API calls remember that requests against the same account are queued
         },
         options: {
             description: 'Health check',
-            auth: false
+            auth: false,
+            tags: ['static', 'health']
         }
     });
 
@@ -1344,6 +1765,263 @@ When making API calls remember that requests against the same account are queued
     });
 
     server.route({
+        method: 'POST',
+        path: '/oauth/msg/notification',
+        async handler(request, h) {
+            if (request.query.validationToken) {
+                request.logger.debug({
+                    msg: 'MS Graph subscription event',
+                    type: 'notification',
+                    account: request.query.account,
+                    validationToken: request.query.validationToken
+                });
+                return h.response(request.query.validationToken).header('Content-Type', 'text/plain').code(200);
+            }
+
+            let accountObject = new Account({
+                account: request.query.account,
+                redis,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
+
+            let accountData;
+            try {
+                accountData = await accountObject.loadAccountData();
+            } catch (err) {
+                if (err.output && err.output.statusCode === 404) {
+                    //ignore, this subscription will expire after a while anyway
+                    return h.response(Buffer.alloc(0)).code(202);
+                }
+                throw err;
+            }
+
+            if (!accountData.outlookSubscription) {
+                request.logger.error({ msg: 'Subscription not found for account', account: request.query.account, payload: request.payload });
+                return h.response(Buffer.alloc(0)).code(202);
+            }
+
+            const outlookSubscription = accountData.outlookSubscription;
+
+            for (let entry of (request.payload && request.payload.value) || []) {
+                // enumerate and queue all entries
+                if (entry.subscriptionId !== outlookSubscription.id || entry.clientState !== outlookSubscription.clientState) {
+                    // Security: Log webhook validation failures - could indicate spoofed notifications
+                    request.logger.warn({
+                        msg: 'Webhook validation failed - potential security issue',
+                        securityEvent: 'webhook_validation_failure',
+                        account: request.query.account,
+                        subscriptionIdMatch: entry.subscriptionId === outlookSubscription.id,
+                        clientStateMatch: entry.clientState === outlookSubscription.clientState,
+                        receivedSubscriptionId: entry.subscriptionId,
+                        changeType: entry.changeType,
+                        resource: entry.resource
+                    });
+                    continue;
+                }
+
+                let event = {
+                    type: entry.changeType,
+                    message: entry.resourceData && entry.resourceData.id
+                };
+
+                await accountObject.pushQueueEvent(event);
+            }
+
+            return h.response(Buffer.alloc(0)).code(202);
+        },
+        options: {
+            description: 'MS Graph API notification handler',
+
+            validate: {
+                options: {
+                    stripUnknown: true,
+                    abortEarly: false,
+                    convert: true
+                },
+                failAction,
+
+                query: Joi.object({
+                    account: accountIdSchema.required(),
+                    validationToken: Joi.string()
+                }).label('MSGNotificationQuery')
+            },
+
+            plugins: {
+                crumb: false
+            },
+
+            auth: false
+        }
+    });
+
+    server.route({
+        method: 'POST',
+        path: '/oauth/msg/lifecycle',
+        async handler(request, h) {
+            if (request.query.validationToken) {
+                request.logger.debug({
+                    msg: 'MS Graph subscription event',
+                    type: 'lifecycle',
+                    account: request.query.account,
+                    validationToken: request.query.validationToken
+                });
+                return h.response(request.query.validationToken).header('Content-Type', 'text/plain').code(200);
+            }
+
+            let accountObject = new Account({
+                account: request.query.account,
+                redis,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
+
+            let accountData;
+            try {
+                accountData = await accountObject.loadAccountData();
+            } catch (err) {
+                if (err.output && err.output.statusCode === 404) {
+                    //ignore, this subscription will expire after a while anyway
+                    return h.response(Buffer.alloc(0)).code(202);
+                }
+                throw err;
+            }
+
+            if (!accountData.outlookSubscription) {
+                request.logger.error({ msg: 'Subscription not found for account', account: request.query.account, payload: request.payload });
+                return h.response(Buffer.alloc(0)).code(202);
+            }
+
+            const outlookSubscription = accountData.outlookSubscription;
+
+            for (let entry of (request.payload && request.payload.value) || []) {
+                request.logger.debug({
+                    msg: 'MS Graph subscription event',
+                    type: 'lifecycle',
+                    account: request.query.account,
+                    lifecycleEvent: entry.lifecycleEvent,
+                    subscriptionId: entry.subscriptionId
+                });
+
+                // enumerate and queue all entries
+                if (entry.subscriptionId !== outlookSubscription.id || entry.clientState !== outlookSubscription.clientState) {
+                    // Security: Log lifecycle webhook validation failures - could indicate spoofed notifications
+                    request.logger.warn({
+                        msg: 'Lifecycle webhook validation failed - potential security issue',
+                        securityEvent: 'lifecycle_webhook_validation_failure',
+                        account: request.query.account,
+                        subscriptionIdMatch: entry.subscriptionId === outlookSubscription.id,
+                        clientStateMatch: entry.clientState === outlookSubscription.clientState,
+                        receivedSubscriptionId: entry.subscriptionId,
+                        lifecycleEvent: entry.lifecycleEvent
+                    });
+                    continue;
+                }
+
+                switch (entry.lifecycleEvent) {
+                    case 'reauthorizationRequired': {
+                        // Microsoft is requesting reauthorization - force renewal immediately
+                        request.logger.info({
+                            msg: 'Received reauthorizationRequired lifecycle event',
+                            subscriptionId: outlookSubscription.id,
+                            account: request.query.account
+                        });
+
+                        // Use the unified renewal method from OutlookClient
+                        // We need to create a client instance to call the renewal method
+                        const { OutlookClient } = require('../lib/email-client/outlook-client');
+                        const client = new OutlookClient(accountData, {
+                            redis,
+                            secret: await getSecret(),
+                            logger: request.logger
+                        });
+
+                        try {
+                            // Force renewal when we get reauthorizationRequired
+                            const renewalResult = await client.renewSubscription(true);
+
+                            if (renewalResult.success) {
+                                request.logger.info({
+                                    msg: 'Successfully renewed subscription from lifecycle event',
+                                    subscriptionId: outlookSubscription.id,
+                                    account: request.query.account,
+                                    newExpirationDateTime: renewalResult.expirationDateTime
+                                });
+                            } else {
+                                request.logger.error({
+                                    msg: 'Failed to renew subscription from lifecycle event',
+                                    subscriptionId: outlookSubscription.id,
+                                    account: request.query.account,
+                                    reason: renewalResult.reason,
+                                    error: renewalResult.error
+                                });
+                            }
+                        } catch (err) {
+                            request.logger.error({
+                                msg: 'Exception while renewing subscription from lifecycle event',
+                                subscriptionId: outlookSubscription.id,
+                                account: request.query.account,
+                                err
+                            });
+                        } finally {
+                            // Clean up client instance
+                            if (client && typeof client.close === 'function') {
+                                try {
+                                    await client.close();
+                                } catch (cleanupErr) {
+                                    request.logger.debug({
+                                        msg: 'Error closing client after lifecycle renewal',
+                                        account: request.query.account,
+                                        err: cleanupErr
+                                    });
+                                }
+                            }
+                        }
+
+                        break;
+                    }
+
+                    case 'subscriptionRemoved': {
+                        // subscription was removed, should we recreate it?
+                        await accountObject.update({
+                            outlookSubscription: {
+                                state: {
+                                    state: 'error',
+                                    error: `Subscription removed`,
+                                    time: Date.now()
+                                }
+                            }
+                        });
+                        break;
+                    }
+                }
+            }
+
+            return h.response(Buffer.alloc(0)).code(202);
+        },
+        options: {
+            description: 'MS Graph API notification handler',
+
+            validate: {
+                options: {
+                    stripUnknown: true,
+                    abortEarly: false,
+                    convert: true
+                },
+                failAction
+            },
+
+            plugins: {
+                crumb: false
+            },
+
+            auth: false
+        }
+    });
+
+    server.route({
         method: 'GET',
         path: '/oauth',
         async handler(request, h) {
@@ -1354,12 +2032,20 @@ When making API calls remember that requests against the same account are queued
 
             if (!request.query.code) {
                 // throw
-                let error = Boom.boomify(new Error(`Oauth failed: node code received`), { statusCode: 400 });
+                let error = Boom.boomify(new Error(`Oauth failed: no code received`), { statusCode: 400 });
                 throw error;
             }
 
             if (!/^account:add:/.test(request.query.state)) {
                 let error = Boom.boomify(new Error(`Oauth failed: invalid state received`), { statusCode: 400 });
+                throw error;
+            }
+
+            // Validate nonce format: 16 bytes base64url encoded = 21-22 characters
+            // Also accept base64 encoding (+, /, =) for backward compatibility with old cached nonces
+            const stateNonce = request.query.state.slice('account:add:'.length);
+            if (!/^[A-Za-z0-9_\-+/]{21,22}={0,2}$/.test(stateNonce)) {
+                let error = Boom.boomify(new Error(`Oauth failed: invalid state format`), { statusCode: 400 });
                 throw error;
             }
 
@@ -1404,32 +2090,75 @@ When making API calls remember that requests against the same account are queued
                         throw error;
                     }
 
-                    let profileRes;
-                    try {
-                        profileRes = await oAuth2Client.request(r.access_token, 'https://gmail.googleapis.com/gmail/v1/users/me/profile');
-                    } catch (err) {
-                        let response = err.oauthRequest && err.oauthRequest.response;
-                        if (response && response.error) {
-                            let message;
-                            if (/Gmail API has not been used in project/.test(response.error.message)) {
-                                message =
-                                    'Can not perform requests against Gmail API as the project has not been enabled. If you are the admin, check notifications on the dashboard.';
-                            } else {
-                                message = response.error.message;
-                            }
+                    const grantedScopes = r.scope ? r.scope.split(/\s+/) : [];
 
-                            let error = Boom.boomify(new Error(message), { statusCode: response.error.code });
-                            throw error;
+                    request.logger.info({ msg: 'OAuth token received', grantedScopes, hasIdToken: !!r.id_token });
+
+                    let profileRes;
+                    let userEmail;
+                    let userName;
+
+                    // With OpenID Connect scopes (openid, email, profile), the ID token contains user info
+                    // This works for all account types including send-only accounts
+                    if (r.id_token && typeof r.id_token === 'string') {
+                        let [, encodedValue] = r.id_token.split('.');
+                        if (encodedValue) {
+                            try {
+                                let decodedValue = JSON.parse(Buffer.from(encodedValue, 'base64url').toString());
+                                if (decodedValue && typeof decodedValue.email === 'string' && isEmail(decodedValue.email)) {
+                                    userEmail = decodedValue.email;
+                                    userName = decodedValue.name || null;
+                                    request.logger.info({ msg: 'Extracted user info from ID token', userEmail, userName });
+                                }
+                            } catch (err) {
+                                request.logger.error({ msg: 'Failed to decode Gmail ID token', err });
+                            }
                         }
-                        throw err;
                     }
 
-                    if (!profileRes || !profileRes || !profileRes.emailAddress) {
+                    // If ID token didn't provide email, fall back to Gmail API profile endpoint
+                    // This should rarely happen since we now request openid/email/profile scopes
+                    if (!userEmail) {
+                        // Check if we have scopes that allow accessing the profile endpoint
+                        const hasProfileScope =
+                            grantedScopes.includes('https://mail.google.com/') ||
+                            grantedScopes.includes('https://www.googleapis.com/auth/gmail.readonly') ||
+                            grantedScopes.includes('https://www.googleapis.com/auth/gmail.modify') ||
+                            grantedScopes.includes('https://www.googleapis.com/auth/gmail.metadata');
+
+                        if (hasProfileScope) {
+                            try {
+                                request.logger.info({ msg: 'Attempting Gmail profile endpoint as fallback' });
+                                profileRes = await oAuth2Client.request(r.access_token, 'https://gmail.googleapis.com/gmail/v1/users/me/profile');
+                                if (profileRes && profileRes.emailAddress) {
+                                    userEmail = profileRes.emailAddress;
+                                }
+                            } catch (err) {
+                                request.logger.error({ msg: 'Failed to fetch user info from Gmail API', err: err.message });
+                                let response = err.oauthRequest && err.oauthRequest.response;
+                                if (response && response.error) {
+                                    let message;
+                                    if (/Gmail API has not been used in project/.test(response.error.message)) {
+                                        message =
+                                            'Can not perform requests against Gmail API as the project has not been enabled. If you are the admin, check notifications on the dashboard.';
+                                    } else {
+                                        message = response.error.message;
+                                    }
+
+                                    let error = Boom.boomify(new Error(message), { statusCode: response.error.code });
+                                    throw error;
+                                }
+                                throw err;
+                            }
+                        }
+                    }
+
+                    if (!userEmail) {
                         let error = Boom.boomify(new Error(`Oauth failed: failed to retrieve account email address`), { statusCode: 400 });
                         throw error;
                     }
 
-                    accountData.email = isEmail(profileRes.emailAddress) ? profileRes.emailAddress : accountData.email;
+                    accountData.email = isEmail(userEmail) ? userEmail : accountData.email;
 
                     const defaultScopes = (oauth2App.baseScopes && GMAIL_SCOPES[oauth2App.baseScopes]) || GMAIL_SCOPES.imap;
 
@@ -1440,17 +2169,19 @@ When making API calls remember that requests against the same account are queued
                             accessToken: r.access_token,
                             refreshToken: r.refresh_token,
                             expires: new Date(Date.now() + r.expires_in * 1000),
-                            scope: r.scope ? r.scope.split(/\s+/) : defaultScopes,
+                            scope: grantedScopes.length ? grantedScopes : defaultScopes,
                             tokenType: r.token_type
                         },
                         {
                             auth: {
-                                user: profileRes.emailAddress
+                                user: userEmail
                             }
                         }
                     );
 
-                    request.logger.info({ msg: 'Provisioned OAuth2 tokens', user: profileRes.emailAddress, provider: oauth2App.provider });
+                    accountData.googleHistoryId = profileRes ? Number(profileRes.historyId) || null : null;
+
+                    request.logger.info({ msg: 'Provisioned OAuth2 tokens', user: userEmail, provider: oauth2App.provider });
                     break;
                 }
 
@@ -1463,53 +2194,102 @@ When making API calls remember that requests against the same account are queued
 
                     let userInfo = {};
 
-                    let clientInfo = request.query.client_info ? JSON.parse(Buffer.from(request.query.client_info, 'base64url').toString()) : false;
+                    if (!oauth2App.baseScopes || oauth2App.baseScopes === 'imap') {
+                        // Read account info from GET arguments
+                        // This is needed because previously EmailEngine did not request for the User.Read scope
 
-                    if (clientInfo && typeof clientInfo.name === 'string') {
-                        userInfo.name = clientInfo.name;
-                    }
+                        let clientInfo = request.query.client_info ? JSON.parse(Buffer.from(request.query.client_info, 'base64url').toString()) : false;
 
-                    if (clientInfo && clientInfo.preferred_username && isEmail(clientInfo.preferred_username)) {
-                        userInfo.email = clientInfo.preferred_username;
-                    }
+                        if (clientInfo && typeof clientInfo.name === 'string') {
+                            userInfo.name = clientInfo.name;
+                        }
 
-                    if (r.id_token && typeof r.id_token === 'string') {
-                        let [, encodedValue] = r.id_token.split('.');
-                        if (encodedValue) {
-                            try {
-                                let decodedValue = JSON.parse(Buffer.from(encodedValue, 'base64url').toString());
-                                if (decodedValue && typeof decodedValue.name === 'string') {
-                                    userInfo.name = decodedValue.name;
+                        if (clientInfo && clientInfo.preferred_username && isEmail(clientInfo.preferred_username)) {
+                            userInfo.email = clientInfo.preferred_username;
+                        }
+
+                        if (r.id_token && typeof r.id_token === 'string') {
+                            let [, encodedValue] = r.id_token.split('.');
+                            if (encodedValue) {
+                                try {
+                                    let decodedValue = JSON.parse(Buffer.from(encodedValue, 'base64url').toString());
+                                    if (decodedValue && typeof decodedValue.name === 'string') {
+                                        userInfo.name = decodedValue.name;
+                                    }
+
+                                    if (decodedValue && typeof decodedValue.email === 'string' && isEmail(decodedValue.email)) {
+                                        userInfo.email = decodedValue.email;
+                                    }
+
+                                    if (decodedValue && typeof decodedValue.preferred_username === 'string' && isEmail(decodedValue.preferred_username)) {
+                                        userInfo.username = decodedValue.preferred_username;
+                                    }
+                                } catch (err) {
+                                    request.logger.error({ msg: 'Failed to decode JWT payload', err, encodedValue });
                                 }
-
-                                if (decodedValue && typeof decodedValue.email === 'string' && isEmail(decodedValue.email)) {
-                                    userInfo.email = decodedValue.email;
-                                }
-
-                                if (decodedValue && typeof decodedValue.preferred_username === 'string' && isEmail(decodedValue.preferred_username)) {
-                                    userInfo.email = decodedValue.preferred_username;
-                                }
-                            } catch (err) {
-                                request.logger.error({ msg: 'Failed to decode JWT payload', err, encodedValue });
                             }
+                        }
+                    } else {
+                        // Request profile info from API
+
+                        let profileRes;
+                        try {
+                            profileRes = await oAuth2Client.request(r.access_token, `${oAuth2Client.apiBase}/v1.0/me`);
+                        } catch (err) {
+                            let response = err.oauthRequest && err.oauthRequest.response;
+                            if (response && response.error) {
+                                let message = response.error.message;
+                                let error = Boom.boomify(new Error(message), { statusCode: response.error.code });
+                                throw error;
+                            }
+                            throw err;
+                        }
+
+                        request.logger.info({
+                            msg: 'User profile returned by MS Graph API',
+                            user: userInfo.email,
+                            provider: oauth2App.provider,
+                            profile: profileRes
+                        });
+
+                        if (profileRes.displayName) {
+                            userInfo.name = profileRes.displayName;
+                        }
+
+                        if (profileRes.mail) {
+                            userInfo.email = profileRes.mail;
+                        }
+
+                        if (profileRes.userPrincipalName) {
+                            userInfo.username = profileRes.userPrincipalName;
                         }
                     }
 
-                    if (!userInfo.email) {
+                    if (!userInfo.email && userInfo.username && isEmail(userInfo.username)) {
+                        userInfo.email = userInfo.username;
+                    }
+
+                    const authData = {
+                        user: userInfo.username || userInfo.email
+                    };
+
+                    if (!authData.user) {
                         let error = Boom.boomify(new Error(`Oauth failed: failed to retrieve account email address`), { statusCode: 400 });
                         throw error;
                     }
 
-                    const authData = {
-                        user: userInfo.email
-                    };
-
-                    accountData.name = accountData.name || userInfo.name || '';
-
-                    if (accountData.delegated && accountData.email && accountData.email !== userInfo.email) {
-                        // Shared mailbox
+                    if (accountData.oauth2 && accountData.oauth2.auth && accountData.oauth2.auth.delegatedUser) {
+                        // Delegated user (shared mailbox) specified in oauth2.auth.delegatedUser
+                        authData.delegatedUser = accountData.oauth2.auth.delegatedUser;
+                        // Ensure email is set to the delegated user if not already provided
+                        if (!accountData.email) {
+                            accountData.email = accountData.oauth2.auth.delegatedUser;
+                        }
+                    } else if (accountData.delegated && accountData.email && accountData.email !== userInfo.email) {
+                        // Legacy: Shared mailbox specified via delegated flag
                         authData.delegatedUser = accountData.email;
                     } else {
+                        // Not a delegated account, use the authenticated user's email
                         accountData.email = userInfo.email;
                     }
 
@@ -1522,7 +2302,7 @@ When making API calls remember that requests against the same account are queued
                             accessToken: r.access_token,
                             refreshToken: r.refresh_token,
                             expires: new Date(Date.now() + r.expires_in * 1000),
-                            scope: r.scope ? r.scope.split(/\s+/) : OUTLOOK_SCOPES,
+                            scope: r.scope ? r.scope.split(/\s+/) : oAuth2Client.scopes,
                             tokenType: r.token_type
                         },
                         {
@@ -1599,6 +2379,7 @@ When making API calls remember that requests against the same account are queued
                 secret: await getSecret(),
                 timeout: request.headers['x-ee-timeout']
             });
+
             let result = await accountObject.create(accountData);
 
             if (accountMeta.n) {
@@ -1629,7 +2410,10 @@ When making API calls remember that requests against the same account are queued
             // have to use HTML redirect, otherwise samesite=strict cookies are not passed on
             return h.view(
                 'redirect',
-                { httpRedirectUrl },
+                {
+                    pageTitleFull: request.app.gt.gettext('Email Account Setup'),
+                    httpRedirectUrl
+                },
                 {
                     layout: 'public'
                 }
@@ -1738,7 +2522,15 @@ When making API calls remember that requests against the same account are queued
 
                     description: Joi.string().empty('').trim().max(1024).required().example('Token description').description('Token description'),
 
-                    scopes: Joi.array().items(Joi.string().valid('api', 'smtp', 'imap-proxy')).single().default(['api']).required().label('Scopes'),
+                    scopes: Joi.array()
+                        .items(Joi.string().valid('api', 'smtp', 'imap-proxy').label('TokenScope'))
+                        .single()
+                        .default(['api'])
+                        .required()
+                        .description(
+                            'Token permission scopes: "api" for REST API access, "smtp" for SMTP submission, "imap-proxy" for IMAP proxy authentication'
+                        )
+                        .label('Scopes'),
 
                     metadata: Joi.string()
                         .empty('')
@@ -1758,7 +2550,7 @@ When making API calls remember that requests against the same account are queued
 
                     restrictions: tokenRestrictionsSchema,
 
-                    ip: ipSchema.description('IP address of the requestor').label('TokenIP')
+                    ip: ipSchema.description('IP address of the requester').label('TokenIP')
                 }).label('CreateToken')
             },
 
@@ -1818,7 +2610,7 @@ When making API calls remember that requests against the same account are queued
 
             response: {
                 schema: Joi.object({
-                    deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the account deleted')
+                    deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the token deleted')
                 }).label('DeleteTokenRequestResponse'),
                 failAction: 'log'
             }
@@ -1890,7 +2682,7 @@ When making API calls remember that requests against the same account are queued
                                     .example('{"example": "value"}')
                                     .description('Related metadata in JSON format')
                                     .label('JsonMetaData'),
-                                ip: ipSchema.description('IP address of the requestor').label('TokenIP')
+                                ip: ipSchema.description('IP address of the requester').label('TokenIP')
                             }).label('RootTokensItem')
                         )
                         .label('RootTokensEntries')
@@ -1971,178 +2763,11 @@ When making API calls remember that requests against the same account are queued
 
                                 restrictions: tokenRestrictionsSchema,
 
-                                ip: ipSchema.description('IP address of the requestor').label('TokenIP')
+                                ip: ipSchema.description('IP address of the requester').label('TokenIP')
                             }).label('AccountTokensItem')
                         )
                         .label('AccountTokensEntries')
                 }).label('AccountsTokensResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'POST',
-        path: '/v1/account',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                if (request.payload.oauth2 && request.payload.oauth2.authorize) {
-                    // redirect to OAuth2 consent screen
-
-                    const oAuth2Client = await oauth2Apps.getClient(request.payload.oauth2.provider);
-                    const nonce = crypto.randomBytes(NONCE_BYTES).toString('base64url');
-
-                    const accountData = request.payload;
-
-                    if (accountData.oauth2.redirectUrl) {
-                        accountData._meta = {
-                            redirectUrl: accountData.oauth2.redirectUrl
-                        };
-                        delete accountData.oauth2.redirectUrl;
-                    }
-
-                    delete accountData.oauth2.authorize; // do not store this property
-                    // store account data
-                    await redis
-                        .multi()
-                        .set(`${REDIS_PREFIX}account:add:${nonce}`, JSON.stringify(accountData))
-                        .expire(`${REDIS_PREFIX}account:add:${nonce}`, Math.floor(MAX_FORM_TTL / 1000))
-                        .exec();
-
-                    // Generate the url that will be used for the consent dialog.
-                    let authorizeUrl;
-                    switch (oAuth2Client.provider) {
-                        case 'gmail': {
-                            let requestData = {
-                                state: `account:add:${nonce}`
-                            };
-
-                            if (accountData.email) {
-                                requestData.email = accountData.email;
-                            }
-
-                            authorizeUrl = oAuth2Client.generateAuthUrl(requestData);
-
-                            break;
-                        }
-
-                        case 'outlook':
-                        case 'mailRu':
-                            authorizeUrl = oAuth2Client.generateAuthUrl({
-                                state: `account:add:${nonce}`
-                            });
-                            break;
-
-                        default: {
-                            let error = Boom.boomify(new Error('Unknown OAuth provider'), { statusCode: 400 });
-                            throw error;
-                        }
-                    }
-
-                    return {
-                        redirect: authorizeUrl
-                    };
-                }
-
-                let result = await accountObject.create(request.payload);
-                return result;
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-
-        options: {
-            description: 'Register new account',
-            notes: 'Registers new IMAP account to be synced',
-            tags: ['api', 'Account'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                payload: Joi.object({
-                    account: Joi.string()
-                        .empty('')
-                        .trim()
-                        .max(256)
-                        .allow(null)
-                        .example('example')
-                        .description('Account ID. If the provided value is `null` then an unique ID will be autogenerated')
-                        .required(),
-
-                    name: Joi.string().max(256).required().example('My Email Account').description('Display name for the account'),
-                    email: Joi.string().empty('').email().example('user@example.com').description('Default email address of the account'),
-
-                    path: Joi.string().empty('').max(1024).default('*').example('INBOX').description('Check changes only on selected path'),
-
-                    subconnections: accountSchemas.subconnections,
-
-                    webhooks: Joi.string()
-                        .uri({
-                            scheme: ['http', 'https'],
-                            allowRelative: false
-                        })
-                        .allow('')
-                        .example('https://myservice.com/imap/webhooks')
-                        .description('Account-specific webhook URL'),
-
-                    copy: Joi.boolean()
-                        .allow(null)
-                        .example(null)
-                        .description('Copy submitted messages to Sent folder. Set to `null` to unset and use provider specific default.'),
-
-                    logs: Joi.boolean().example(false).description('Store recent logs').default(false),
-
-                    notifyFrom: accountSchemas.notifyFrom.default('now'),
-                    syncFrom: accountSchemas.syncFrom.default(null),
-
-                    proxy: settingsSchema.proxyUrl,
-                    smtpEhloName: settingsSchema.smtpEhloName,
-
-                    imap: Joi.object(imapSchema).allow(false).description('IMAP configuration').label('ImapConfiguration'),
-
-                    smtp: Joi.object(smtpSchema).allow(false).description('SMTP configuration').label('SmtpConfiguration'),
-
-                    oauth2: Joi.object(oauth2Schema).allow(false).description('OAuth2 configuration').label('OAuth2'),
-
-                    locale: Joi.string().empty('').max(100).example('fr').description('Optional locale'),
-                    tz: Joi.string().empty('').max(100).example('Europe/Tallinn').description('Optional timezone')
-                }).label('CreateAccount')
-            },
-
-            response: {
-                schema: Joi.object({
-                    account: accountIdSchema.required(),
-                    state: Joi.string().required().valid('existing', 'new').example('new').description('Is the account new or updated existing')
-                }).label('CreateAccountResponse'),
                 failAction: 'log'
             }
         }
@@ -2163,8 +2788,9 @@ When making API calls remember that requests against the same account are queued
                     subconnections: request.payload.subconnections,
                     redirectUrl: request.payload.redirectUrl,
                     delegated: request.payload.delegated,
+                    path: request.payload.path && !request.payload.path.includes('*') ? request.payload.path : null,
                     // identify request
-                    n: crypto.randomBytes(NONCE_BYTES).toString('base64'),
+                    n: crypto.randomBytes(NONCE_BYTES).toString('base64url'),
                     t: Date.now()
                 });
 
@@ -2248,39 +2874,38 @@ When making API calls remember that requests against the same account are queued
                         .example('example')
                         .default(null)
                         .description(
-                            'Account ID. If the provided value is `null` then an unique ID will be autogenerated. Using an existing account ID will update settings for that existing account.'
+                            'Account ID. If set to `null`, a unique ID will be generated automatically. If you provide an existing account ID, the settings for that account will be updated instead'
                         ),
 
                     name: Joi.string().empty('').max(256).example('My Email Account').description('Display name for the account'),
-                    email: Joi.string().empty('').email().example('user@example.com').description('Default email address of the account'),
+
+                    email: Joi.string()
+                        .empty('')
+                        .email()
+                        .example('user@example.com')
+                        .description('Specifies the default email address for this account. Users can change it if needed.'),
 
                     delegated: Joi.boolean()
                         .empty('')
                         .truthy('Y', 'true', '1')
                         .falsy('N', 'false', 0)
                         .default(false)
-                        .description('If true then acts as a shared mailbox. Available for MS365 OAuth2 accounts.'),
+                        .description('If true, configures this account as a shared mailbox. Currently supported by MS365 OAuth2 accounts'),
 
                     syncFrom: accountSchemas.syncFrom,
                     notifyFrom: accountSchemas.notifyFrom,
 
                     subconnections: accountSchemas.subconnections,
 
+                    path: accountPathSchema.example(['*']).label('AccountFormPath'),
                     redirectUrl: Joi.string()
                         .empty('')
                         .uri({ scheme: ['http', 'https'], allowRelative: false })
                         .required()
                         .example('https://myapp/account/settings.php')
-                        .description('The user will be redirected to this URL after submitting the authentication form'),
+                        .description('After the authentication process is completed, the user is redirected to this URL'),
 
-                    type: Joi.string()
-                        .empty('')
-                        .allow(false)
-                        .default(false)
-                        .example('imap')
-                        .description(
-                            'Display the form for the specified account type (either "imap" or an OAuth2 app ID) instead of allowing the user to choose'
-                        )
+                    type: defaultAccountTypeSchema
                 }).label('RequestAuthForm')
             },
 
@@ -2293,724 +2918,6 @@ When making API calls remember that requests against the same account are queued
                         .example('https://ee.example.com/accounts/new?data=eyJhY2NvdW50IjoiZXhh...L0W_BkFH5HW6Krwmr7c&type=imap')
                         .description('Generated URL to the hosted authentication form')
                 }).label('RequestAuthFormResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'PUT',
-        path: '/v1/account/{account}',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.update(request.payload);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Update account info',
-            notes: 'Updates account information',
-            tags: ['api', 'Account'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-
-                payload: Joi.object({
-                    name: Joi.string().max(256).example('My Email Account').description('Display name for the account'),
-                    email: Joi.string().empty('').email().example('user@example.com').description('Default email address of the account'),
-
-                    path: Joi.string().empty('').max(1024).default('*').example('INBOX').description('Check changes only on selected path'),
-
-                    subconnections: accountSchemas.subconnections,
-
-                    webhooks: Joi.string()
-                        .uri({
-                            scheme: ['http', 'https'],
-                            allowRelative: false
-                        })
-                        .allow('')
-                        .example('https://myservice.com/imap/webhooks')
-                        .description('Account-specific webhook URL'),
-
-                    copy: Joi.boolean()
-                        .allow(null)
-                        .example(null)
-                        .description('Copy submitted messages to Sent folder. Set to `null` to unset and use provider specific default.'),
-
-                    logs: Joi.boolean().example(false).description('Store recent logs'),
-
-                    notifyFrom: accountSchemas.notifyFrom,
-                    syncFrom: accountSchemas.syncFrom,
-
-                    proxy: settingsSchema.proxyUrl,
-                    smtpEhloName: settingsSchema.smtpEhloName,
-
-                    imap: Joi.object(imapUpdateSchema).allow(false).description('IMAP configuration').label('IMAPUpdate'),
-                    smtp: Joi.object(smtpUpdateSchema).allow(false).description('SMTP configuration').label('SMTPUpdate'),
-                    oauth2: Joi.object(oauth2UpdateSchema).allow(false).description('OAuth2 configuration').label('OAuth2Update'),
-
-                    locale: Joi.string().empty('').max(100).example('fr').description('Optional locale'),
-                    tz: Joi.string().empty('').max(100).example('Europe/Tallinn').description('Optional timezone')
-                }).label('UpdateAccount')
-            },
-
-            response: {
-                schema: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'PUT',
-        path: '/v1/account/{account}/reconnect',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return { reconnect: await accountObject.requestReconnect(request.payload) };
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Request reconnect',
-            notes: 'Requests connection to be reconnected',
-            tags: ['api', 'Account'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-
-                payload: Joi.object({
-                    reconnect: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(false).description('Only reconnect if true')
-                }).label('RequestReconnect')
-            },
-
-            response: {
-                schema: Joi.object({
-                    reconnect: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(false).description('Reconnection status')
-                }).label('RequestReconnectResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'PUT',
-        path: '/v1/account/{account}/sync',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return { sync: await accountObject.requestSync(request.payload) };
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Request syncing',
-            notes: 'Requests account syncing to be run immediatelly',
-            tags: ['api', 'Account'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-
-                payload: Joi.object({
-                    sync: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(false).description('Only sync if true')
-                }).label('RequestSync')
-            },
-
-            response: {
-                schema: Joi.object({
-                    sync: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(false).description('Sync status')
-                }).label('RequestSyncResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'DELETE',
-        path: '/v1/account/{account}',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                documentsQueue,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.delete();
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Remove synced account',
-            notes: 'Stop syncing IMAP account and delete cached values',
-            tags: ['api', 'Account'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                })
-            },
-
-            response: {
-                schema: Joi.object({
-                    account: accountIdSchema.required(),
-                    deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the account deleted')
-                }).label('DeleteRequestResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'PUT',
-        path: '/v1/account/{account}/flush',
-
-        async handler(request, h) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                esClient: await h.getESClient(request.logger),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return { flush: await accountObject.flush(request.payload) };
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Request account flush',
-            notes: 'Deletes all email indexes from Redis and ElasticSearch and re-creates the index for that account. You can only run a single flush operation at a time, so you must wait until the previous flush has finished before initiating a new one.',
-            tags: ['api', 'Account'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-
-                payload: Joi.object({
-                    flush: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(false).description('Only flush the account if true'),
-                    notifyFrom: accountSchemas.notifyFrom.default('now'),
-                    syncFrom: accountSchemas.syncFrom
-                }).label('RequestFlush')
-            },
-
-            response: {
-                schema: Joi.object({
-                    flush: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(false).description('Flush status')
-                }).label('RequestFlushResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'GET',
-        path: '/v1/accounts',
-
-        async handler(request) {
-            try {
-                let accountObject = new Account({
-                    redis,
-                    account: request.params.account,
-                    call,
-                    secret: await getSecret(),
-                    timeout: request.headers['x-ee-timeout']
-                });
-
-                return await accountObject.listAccounts(request.query.state, request.query.query, request.query.page, request.query.pageSize);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-
-        options: {
-            description: 'List accounts',
-            notes: 'Lists registered accounts',
-            tags: ['api', 'Account'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                query: Joi.object({
-                    page: Joi.number()
-                        .integer()
-                        .min(0)
-                        .max(1024 * 1024)
-                        .default(0)
-                        .example(0)
-                        .description('Page number (zero indexed, so use 0 for first page)')
-                        .label('PageNumber'),
-                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize'),
-                    state: Joi.string()
-                        .valid('init', 'syncing', 'connecting', 'connected', 'authenticationError', 'connectError', 'unset', 'disconnected')
-                        .example('connected')
-                        .description('Filter accounts by state')
-                        .label('AccountState'),
-                    query: Joi.string().example('user@example').description('Filter accounts by string match').label('AccountQuery')
-                }).label('AccountsFilter')
-            },
-
-            response: {
-                schema: Joi.object({
-                    total: Joi.number().integer().example(120).description('How many matching entries').label('TotalNumber'),
-                    page: Joi.number().integer().example(0).description('Current page (0-based index)').label('PageNumber'),
-                    pages: Joi.number().integer().example(24).description('Total page count').label('PagesNumber'),
-
-                    accounts: Joi.array()
-                        .items(
-                            Joi.object({
-                                account: accountIdSchema.required(),
-                                name: Joi.string().max(256).example('My Email Account').description('Display name for the account'),
-                                email: Joi.string().empty('').email().example('user@example.com').description('Default email address of the account'),
-                                type: Joi.string()
-                                    .valid(...['imap'].concat(Object.keys(OAUTH_PROVIDERS)).concat('oauth2'))
-                                    .example('outlook')
-                                    .description('Account type')
-                                    .required(),
-                                app: Joi.string().max(256).example('AAABhaBPHscAAAAH').description('OAuth2 application ID'),
-                                state: Joi.string()
-                                    .required()
-                                    .valid('init', 'syncing', 'connecting', 'connected', 'authenticationError', 'connectError', 'unset', 'disconnected')
-                                    .example('connected')
-                                    .description('Account state'),
-                                webhooks: Joi.string()
-                                    .uri({
-                                        scheme: ['http', 'https'],
-                                        allowRelative: false
-                                    })
-                                    .example('https://myservice.com/imap/webhooks')
-                                    .description('Account-specific webhook URL'),
-                                proxy: settingsSchema.proxyUrl,
-                                smtpEhloName: settingsSchema.smtpEhloName,
-
-                                counters: accountCountersSchema,
-
-                                syncTime: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('Last sync time'),
-                                lastError: lastErrorSchema.allow(null)
-                            }).label('AccountResponseItem')
-                        )
-                        .label('AccountEntries')
-                }).label('AccountsFilterResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'GET',
-        path: '/v1/account/{account}',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-            try {
-                let accountData = await accountObject.loadAccountData();
-
-                // remove secrets
-                for (let type of ['imap', 'smtp', 'oauth2']) {
-                    if (accountData[type] && accountData[type].auth) {
-                        for (let key of ['pass', 'accessToken', 'refreshToken']) {
-                            if (key in accountData[type].auth) {
-                                accountData[type].auth[key] = '******';
-                            }
-                        }
-                    }
-
-                    if (accountData[type]) {
-                        for (let key of ['accessToken', 'refreshToken']) {
-                            if (key in accountData[type]) {
-                                accountData[type][key] = '******';
-                            }
-                        }
-                    }
-                }
-
-                let result = {};
-
-                for (let key of [
-                    'account',
-                    'name',
-                    'email',
-                    'copy',
-                    'logs',
-                    'notifyFrom',
-                    'syncFrom',
-                    'path',
-                    'subconnections',
-                    'webhooks',
-                    'proxy',
-                    'smtpEhloName',
-                    'imap',
-                    'smtp',
-                    'oauth2',
-                    'state',
-                    'smtpStatus',
-                    'locale',
-                    'tz'
-                ]) {
-                    if (key in accountData) {
-                        result[key] = accountData[key];
-                    }
-                }
-
-                // default false
-                for (let key of ['logs']) {
-                    result[key] = !!result[key];
-                }
-
-                // default null
-                for (let key of ['notifyFrom', 'syncFrom', 'lastError', 'smtpStatus']) {
-                    result[key] = result[key] || null;
-                }
-
-                if (accountData.oauth2 && accountData.oauth2.provider) {
-                    let app = await oauth2Apps.get(accountData.oauth2.provider);
-
-                    if (app) {
-                        result.type = app.provider;
-                        if (app.id !== app.provider) {
-                            result.app = app.id;
-                        }
-                    } else {
-                        result.type = 'oauth2';
-                    }
-                } else if (accountData.imap && !accountData.imap.disabled) {
-                    result.type = 'imap';
-                } else {
-                    result.type = 'sending';
-                }
-
-                if (accountData.sync) {
-                    result.syncTime = accountData.sync;
-                }
-
-                if (accountData.state) {
-                    result.lastError = accountData.state === 'connected' ? null : accountData.lastErrorState;
-                }
-
-                if (accountData.counters) {
-                    result.counters = accountData.counters;
-                }
-
-                if (request.query.quota) {
-                    result.quota = await accountObject.getQuota();
-                }
-
-                return result;
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Get account info',
-            notes: 'Returns stored information about the account. Passwords are not included.',
-            tags: ['api', 'Account'],
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-
-                query: Joi.object({
-                    quota: Joi.boolean()
-                        .truthy('Y', 'true', '1')
-                        .falsy('N', 'false', 0)
-                        .default(false)
-                        .description('If true, then include quota information in the response')
-                        .label('AccountQuota')
-                })
-            },
-
-            response: {
-                schema: Joi.object({
-                    account: accountIdSchema.required(),
-
-                    name: Joi.string().max(256).example('My Email Account').description('Display name for the account'),
-                    email: Joi.string().empty('').email().example('user@example.com').description('Default email address of the account'),
-
-                    copy: Joi.boolean().example(true).description('Copy submitted messages to Sent folder'),
-                    logs: Joi.boolean().example(false).description('Store recent logs'),
-
-                    notifyFrom: accountSchemas.notifyFrom,
-                    syncFrom: accountSchemas.syncFrom,
-
-                    path: Joi.string().empty('').max(1024).default('*').example('INBOX').description('Check changes only on selected path'),
-
-                    subconnections: accountSchemas.subconnections,
-
-                    webhooks: Joi.string()
-                        .uri({
-                            scheme: ['http', 'https'],
-                            allowRelative: false
-                        })
-                        .example('https://myservice.com/imap/webhooks')
-                        .description('Account-specific webhook URL'),
-                    proxy: settingsSchema.proxyUrl,
-                    smtpEhloName: settingsSchema.smtpEhloName,
-
-                    imap: Joi.object(imapSchema).description('IMAP configuration').label('IMAPResponse'),
-
-                    smtp: Joi.object(smtpSchema).description('SMTP configuration').label('SMTPResponse'),
-
-                    oauth2: Joi.object(oauth2Schema).description('OAuth2 configuration').label('Oauth2Response'),
-
-                    state: Joi.string()
-                        .valid('init', 'syncing', 'connecting', 'connected', 'authenticationError', 'connectError', 'unset', 'disconnected')
-                        .example('connected')
-                        .description('Informational account state')
-                        .label('AccountInfoState'),
-
-                    smtpStatus: Joi.object({
-                        created: Joi.date()
-                            .iso()
-                            .allow(null)
-                            .example('2021-07-08T07:06:34.336Z')
-                            .description('When was the status for SMTP connection last updated'),
-                        status: Joi.string().valid('ok', 'error').description('Was the last SMTP attempt successful or not'),
-                        response: Joi.string().example('250 OK').description('SMTP response message for delivery attempt'),
-                        description: Joi.string().example('Authentication failed').description('Error information'),
-                        responseCode: Joi.number().integer().example(500).description('Error status code'),
-                        code: Joi.string().example('EAUTH').description('Error type identifier'),
-                        command: Joi.string().example('AUTH PLAIN').description('SMTP command that failed')
-                    })
-                        .description('Information about the last SMTP connection attempt')
-                        .label('SMTPInfoStatus'),
-
-                    locale: Joi.string().empty('').max(100).example('fr').description('Optional locale'),
-                    tz: Joi.string().empty('').max(100).example('Europe/Tallinn').description('Optional timezone'),
-
-                    type: Joi.string()
-                        .valid(...['imap'].concat(Object.keys(OAUTH_PROVIDERS)).concat('oauth2'))
-                        .example('outlook')
-                        .description('Account type')
-                        .label('AccountType')
-                        .required(),
-                    app: Joi.string().max(256).example('AAABhaBPHscAAAAH').description('OAuth2 application ID'),
-
-                    counters: accountCountersSchema,
-
-                    quota: Joi.object({
-                        usage: Joi.number().integer().example(8547884032).description('How many bytes has the account stored in emails'),
-                        limit: Joi.number().integer().example(16106127360).description('How many bytes can the account store emails'),
-                        status: Joi.string().example('53%').description('Textual information about the usage')
-                    })
-                        .label('AccountQuota')
-                        .allow(false)
-                        .description(
-                            'Account quota information if query argument quota=true. This value will be false if the server does not provide quota information.'
-                        ),
-
-                    syncTime: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('Last sync time'),
-
-                    lastError: lastErrorSchema.allow(null)
-                }).label('AccountResponse'),
                 failAction: 'log'
             }
         }
@@ -3195,7 +3102,7 @@ When making API calls remember that requests against the same account are queued
             });
 
             try {
-                return await accountObject.renameMailbox(request.payload.path, request.payload.newPath);
+                return await accountObject.modifyMailbox(request.payload.path, request.payload.newPath, request.payload.subscribed);
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
                 if (Boom.isBoom(err)) {
@@ -3213,8 +3120,8 @@ When making API calls remember that requests against the same account are queued
         },
 
         options: {
-            description: 'Rename mailbox',
-            notes: 'Rename an existing mailbox folder',
+            description: 'Modify mailbox',
+            notes: 'Modify an existing mailbox folder (rename or change subscription status)',
             tags: ['api', 'Mailbox'],
 
             plugins: {},
@@ -3238,22 +3145,29 @@ When making API calls remember that requests against the same account are queued
                 }),
 
                 payload: Joi.object({
-                    path: Joi.string().required().example('Previous Mail').description('Mailbox folder path to rename').label('ExistingMailboxPath'),
+                    path: Joi.string().required().example('Folder Name').description('Mailbox folder path to modify').label('ExistingMailboxPath'),
                     newPath: Joi.array()
                         .items(Joi.string().max(256))
                         .single()
                         .example(['Parent folder', 'Subfolder'])
-                        .description('New mailbox path as an array or a string. If account is namespaced then namespace prefix is added by default.')
-                        .label('TargetMailboxPath')
-                }).label('RenameMailbox')
+                        .description('New mailbox path as an array or a string. If account is namespaced then namespace prefix is added by default. Optional.')
+                        .label('TargetMailboxPath'),
+                    subscribed: Joi.boolean()
+                        .example(true)
+                        .description('Change mailbox subscription status. Only applies to IMAP accounts, ignored for Gmail and Outlook.')
+                        .label('SubscriptionStatus')
+                })
+                    .or('newPath', 'subscribed')
+                    .label('ModifyMailbox')
             },
 
             response: {
                 schema: Joi.object({
-                    path: Joi.string().required().example('Previous Mail').description('Mailbox folder path to rename').label('ExistingMailboxPath'),
-                    newPath: Joi.string().required().example('Kalender/S&APw-nnip&AOQ-evad').description('Full path to mailbox').label('NewMailboxPath'),
-                    renamed: Joi.boolean().example(true).description('Was the mailbox renamed')
-                }).label('RenameMailboxResponse'),
+                    path: Joi.string().required().example('Mail').description('Mailbox folder path').label('ExistingMailboxPath'),
+                    newPath: Joi.string().example('Kalender/S&APw-nnip&AOQ-evad').description('Full path to mailbox if renamed').label('NewMailboxPath'),
+                    renamed: Joi.boolean().example(true).description('Was the mailbox renamed'),
+                    subscribed: Joi.boolean().example(true).description('Subscription status after modification')
+                }).label('ModifyMailboxResponse'),
                 failAction: 'log'
             }
         }
@@ -3328,1274 +3242,6 @@ When making API calls remember that requests against the same account are queued
     });
 
     server.route({
-        method: 'GET',
-        path: '/v1/account/{account}/message/{message}/source',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.getRawMessage(request.params.message);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Download raw message',
-            notes: 'Fetches raw message as a stream',
-            tags: ['api', 'Message'],
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required(),
-                    message: Joi.string().base64({ paddingRequired: false, urlSafe: true }).max(256).example('AAAAAQAACnA').required().description('Message ID')
-                }).label('RawMessageRequest')
-            } /*,
-
-            response: {
-                schema: Joi.binary().example('MIME-Version: 1.0...').description('RFC822 formatted email').label('RawMessageResponse'),
-                failAction: 'log'
-            }
-            */
-        }
-    });
-
-    server.route({
-        method: 'GET',
-        path: '/v1/account/{account}/attachment/{attachment}',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.getAttachment(request.params.attachment);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Download attachment',
-            notes: 'Fetches attachment file as a binary stream',
-            tags: ['api', 'Message'],
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required(),
-                    attachment: Joi.string()
-                        .base64({ paddingRequired: false, urlSafe: true })
-                        .max(256)
-                        .required()
-                        .example('AAAAAQAACnAcde')
-                        .description('Attachment ID')
-                })
-            }
-        }
-    });
-
-    server.route({
-        method: 'GET',
-        path: '/v1/account/{account}/message/{message}',
-
-        async handler(request, h) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                esClient: await h.getESClient(request.logger),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.getMessage(request.params.message, request.query);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Get message information',
-            notes: 'Returns details of a specific message. By default text content is not included, use textType value to force retrieving text',
-            tags: ['api', 'Message'],
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                query: Joi.object({
-                    maxBytes: Joi.number()
-                        .integer()
-                        .min(0)
-                        .max(1024 * 1024 * 1024)
-                        .example(5 * 1025 * 1024)
-                        .description('Max length of text content. This setting is ignored if `documentStore` is `true`.'),
-                    textType: Joi.string()
-                        .lowercase()
-                        .valid('html', 'plain', '*')
-                        .example('*')
-                        .description('Which text content to return, use * for all. By default text content is not returned.'),
-
-                    webSafeHtml: Joi.boolean()
-                        .truthy('Y', 'true', '1')
-                        .falsy('N', 'false', 0)
-                        .default(false)
-                        .description(
-                            'Shorthand option to fetch and preprocess HTML and inlined images. Overrides `textType`, `preProcessHtml`, and `preProcessHtml` options.'
-                        )
-                        .label('WebSafeHtml'),
-
-                    embedAttachedImages: Joi.boolean()
-                        .truthy('Y', 'true', '1')
-                        .falsy('N', 'false', 0)
-                        .default(false)
-                        .description('If true, then fetches attached images and embeds these in the HTML as data URIs')
-                        .label('EmbedImages'),
-
-                    preProcessHtml: Joi.boolean()
-                        .truthy('Y', 'true', '1')
-                        .falsy('N', 'false', 0)
-                        .default(false)
-                        .description('If true, then pre-processes HTML for compatibility')
-                        .label('PreProcess'),
-
-                    markAsSeen: Joi.boolean()
-                        .truthy('Y', 'true', '1')
-                        .falsy('N', 'false', 0)
-                        .default(false)
-                        .description('If true, then marks unseen email as seen while returning the message')
-                        .label('MarkAsSeen'),
-
-                    documentStore: documentStoreSchema.default(false)
-                }),
-
-                params: Joi.object({
-                    account: accountIdSchema.required(),
-                    message: Joi.string().base64({ paddingRequired: false, urlSafe: true }).max(256).required().example('AAAAAQAACnA').description('Message ID')
-                })
-            },
-
-            response: {
-                schema: messageDetailsSchema,
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'POST',
-        path: '/v1/account/{account}/message',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.uploadMessage(request.payload);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            payload: {
-                maxBytes: MAX_BODY_SIZE
-            },
-
-            description: 'Upload message',
-            notes: 'Upload a message structure, compile it into an EML file and store it into selected mailbox.',
-            tags: ['api', 'Message'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-
-                payload: Joi.object({
-                    path: Joi.string().required().example('INBOX').description('Target mailbox folder path'),
-
-                    flags: Joi.array().items(Joi.string().max(128)).example(['\\Seen', '\\Draft']).default([]).description('Message flags').label('Flags'),
-                    internalDate: Joi.date().iso().example('2021-07-08T07:06:34.336Z').description('Sets the internal date for this message'),
-
-                    reference: Joi.object({
-                        message: Joi.string()
-                            .base64({ paddingRequired: false, urlSafe: true })
-                            .max(256)
-                            .required()
-                            .example('AAAAAQAACnA')
-                            .description('Referenced message ID'),
-                        action: Joi.string().lowercase().valid('forward', 'reply').example('reply').default('reply'),
-                        inline: Joi.boolean()
-                            .truthy('Y', 'true', '1')
-                            .falsy('N', 'false', 0)
-                            .default(false)
-                            .description('If true, then blockquotes the email that is being replied to')
-                            .label('InlineReply'),
-                        forwardAttachments: Joi.boolean()
-                            .truthy('Y', 'true', '1')
-                            .falsy('N', 'false', 0)
-                            .default(false)
-                            .description('If true, then includes attachments in forwarded message')
-                            .when('action', {
-                                is: 'forward',
-                                then: Joi.optional(),
-                                otherwise: Joi.forbidden()
-                            })
-                            .label('ForwardAttachments'),
-                        ignoreMissing: Joi.boolean()
-                            .truthy('Y', 'true', '1')
-                            .falsy('N', 'false', 0)
-                            .default(false)
-                            .description('If true, then processes the email even if the original message is not available anymore')
-                            .label('IgnoreMissing'),
-                        documentStore: documentStoreSchema.default(false)
-                    })
-                        .description('Message reference for a reply or a forward. This is EmailEngine specific ID, not Message-ID header value.')
-                        .label('MessageReference'),
-
-                    raw: Joi.string()
-                        .base64()
-                        .max(MAX_ATTACHMENT_SIZE)
-                        .example('TUlNRS1WZXJzaW9uOiAxLjANClN1YmplY3Q6IGhlbGxvIHdvcmxkDQoNCkhlbGxvIQ0K')
-                        .description(
-                            'Base64 encoded email message in rfc822 format. If you provide other keys as well then these will override the values in the raw message.'
-                        )
-                        .label('RFC822Raw'),
-
-                    from: addressSchema.example({ name: 'From Me', address: 'sender@example.com' }).description('The From address').label('FromAddress'),
-
-                    to: Joi.array()
-                        .items(addressSchema)
-                        .single()
-                        .description('List of addresses')
-                        .example([{ address: 'recipient@example.com' }])
-                        .label('AddressList'),
-
-                    cc: Joi.array().items(addressSchema).single().description('List of addresses').label('AddressList'),
-
-                    bcc: Joi.array().items(addressSchema).single().description('List of addresses').label('AddressList'),
-
-                    subject: Joi.string()
-                        .allow('')
-                        .max(10 * 1024)
-                        .example('What a wonderful message')
-                        .description('Message subject'),
-
-                    text: Joi.string().max(MAX_ATTACHMENT_SIZE).example('Hello from myself!').description('Message Text'),
-
-                    html: Joi.string().max(MAX_ATTACHMENT_SIZE).example('<p>Hello from myself!</p>').description('Message HTML'),
-
-                    attachments: Joi.array()
-                        .items(
-                            Joi.object({
-                                filename: Joi.string().max(256).example('transparent.gif'),
-                                content: Joi.string()
-                                    .base64()
-                                    .max(MAX_ATTACHMENT_SIZE)
-                                    .required()
-                                    .example('R0lGODlhAQABAIAAAP///wAAACwAAAAAAQABAAACAkQBADs=')
-                                    .description('Base64 formatted attachment file')
-                                    .when('reference', {
-                                        is: Joi.exist().not(false, null),
-                                        then: Joi.forbidden(),
-                                        otherwise: Joi.required()
-                                    }),
-
-                                contentType: Joi.string().lowercase().max(256).example('image/gif'),
-                                contentDisposition: Joi.string().lowercase().valid('inline', 'attachment'),
-                                cid: Joi.string().max(256).example('unique-image-id@localhost').description('Content-ID value for embedded images'),
-                                encoding: Joi.string().valid('base64').default('base64'),
-
-                                reference: Joi.string()
-                                    .base64({ paddingRequired: false, urlSafe: true })
-                                    .max(256)
-                                    .allow(false, null)
-                                    .example('AAAAAQAACnAcde')
-                                    .description(
-                                        'Reference an existing attachment ID instead of providing attachment content. If set, then `content` option is not allowed. Otherwise `content` is required.'
-                                    )
-                            }).label('UploadAttachment')
-                        )
-                        .description('List of attachments')
-                        .label('UploadAttachmentList'),
-
-                    messageId: Joi.string().max(996).example('<test123@example.com>').description('Message ID'),
-                    headers: Joi.object().label('CustomHeaders').description('Custom Headers').unknown(),
-
-                    locale: Joi.string().empty('').max(100).example('fr').description('Optional locale'),
-                    tz: Joi.string().empty('').max(100).example('Europe/Tallinn').description('Optional timezone')
-                }).label('MessageUpload')
-            },
-
-            response: {
-                schema: Joi.object({
-                    id: Joi.string()
-                        .example('AAAAAgAACrI')
-                        .description('Message ID. NB! This and other fields might not be present if server did not provide enough information')
-                        .label('MessageAppendId'),
-                    path: Joi.string().example('INBOX').description('Folder this message was uploaded to').label('MessageAppendPath'),
-                    uid: Joi.number().integer().example(12345).description('UID of uploaded message'),
-                    uidValidity: Joi.string().example('12345').description('UIDVALIDTITY of the target folder. Numeric value cast as string.'),
-                    seq: Joi.number().integer().example(12345).description('Sequence number of uploaded message'),
-
-                    messageId: Joi.string().max(996).example('<test123@example.com>').description('Message ID'),
-
-                    reference: Joi.object({
-                        message: Joi.string()
-                            .base64({ paddingRequired: false, urlSafe: true })
-                            .max(256)
-                            .required()
-                            .example('AAAAAQAACnA')
-                            .description('Referenced message ID'),
-                        success: Joi.boolean().example(true).description('Was the referenced message processed').label('ResponseReferenceSuccess'),
-                        documentStore: documentStoreSchema.default(false),
-                        error: Joi.string().example('Referenced message was not found').description('An error message if referenced message processing failed')
-                    })
-                        .description('Reference info if referencing was requested')
-                        .label('ResponseReference')
-                }).label('MessageUploadResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'PUT',
-        path: '/v1/account/{account}/message/{message}',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.updateMessage(request.params.message, request.payload);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Update message',
-            notes: 'Update message information. Mainly this means changing message flag values',
-            tags: ['api', 'Message'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required(),
-                    message: Joi.string().max(256).required().example('AAAAAQAACnA').description('Message ID')
-                }),
-
-                payload: messageUpdateSchema
-            },
-            response: {
-                schema: Joi.object({
-                    flags: Joi.object({
-                        add: Joi.boolean().example(true),
-                        delete: Joi.boolean().example(false),
-                        set: Joi.boolean().example(false)
-                    }).label('FlagResponse'),
-                    labels: Joi.object({
-                        add: Joi.boolean().example(true),
-                        delete: Joi.boolean().example(false),
-                        set: Joi.boolean().example(false)
-                    }).label('FlagResponse')
-                }).label('MessageUpdateResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'PUT',
-        path: '/v1/account/{account}/messages',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.updateMessages(request.query.path, request.payload.search, request.payload.update);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Update messages',
-            notes: 'Update message information for matching emails',
-            tags: ['api', 'Multi Message Actions'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-
-                query: Joi.object({
-                    path: Joi.string().empty('').required().example('INBOX').description('Mailbox folder path')
-                }).label('MessagesUpdateQuery'),
-
-                payload: Joi.object({
-                    search: searchSchema,
-                    update: messageUpdateSchema
-                }).label('MessagesUpdateRequest')
-            },
-            response: {
-                schema: Joi.object({
-                    flags: Joi.object({
-                        add: Joi.boolean().example(true),
-                        delete: Joi.boolean().example(false),
-                        set: Joi.boolean().example(false)
-                    }).label('FlagResponse'),
-                    labels: Joi.object({
-                        add: Joi.boolean().example(true),
-                        delete: Joi.boolean().example(false),
-                        set: Joi.boolean().example(false)
-                    }).label('FlagResponse')
-                }).label('MessageUpdateResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'PUT',
-        path: '/v1/account/{account}/message/{message}/move',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.moveMessage(request.params.message, request.payload);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Move message',
-            notes: 'Move message to another folder',
-            tags: ['api', 'Message'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required(),
-                    message: Joi.string().max(256).required().example('AAAAAQAACnA').description('Message ID')
-                }),
-
-                payload: Joi.object({
-                    path: Joi.string().required().example('INBOX').description('Target mailbox folder path')
-                }).label('MessageMove')
-            },
-
-            response: {
-                schema: Joi.object({
-                    path: Joi.string().required().example('INBOX').description('Target mailbox folder path'),
-                    id: Joi.string().max(256).required().example('AAAAAQAACnA').description('Message ID'),
-                    uid: Joi.number().integer().example(12345).description('UID of moved message')
-                }).label('MessageMoveResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'PUT',
-        path: '/v1/account/{account}/messages/move',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.moveMessages(request.query.path, request.payload.search, { path: request.payload.path });
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Move messages',
-            notes: 'Move messages matching to a search query to another folder',
-            tags: ['api', 'Multi Message Actions'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-
-                query: Joi.object({
-                    path: Joi.string().empty('').required().example('INBOX').description('Source mailbox folder path')
-                }).label('MessagesMoveQuery'),
-
-                payload: Joi.object({
-                    search: searchSchema,
-                    path: Joi.string().required().example('INBOX').description('Target mailbox folder path')
-                }).label('MessagesMoveRequest')
-            },
-
-            response: {
-                schema: Joi.object({
-                    path: Joi.string().required().example('INBOX').description('Target mailbox folder path'),
-                    idMap: Joi.array()
-                        .items(Joi.array().length(2).items(Joi.string().max(256).required().description('Message ID')))
-                        .example([['AAAAAQAACnA', 'AAAAAwAAAD4']])
-                        .description('An optional map of source and target ID values, if the server provided this info')
-                }).label('MessagesMoveResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'DELETE',
-        path: '/v1/account/{account}/message/{message}',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.deleteMessage(request.params.message, request.query.force);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Delete message',
-            notes: 'Move message to Trash or delete it if already in Trash',
-            tags: ['api', 'Message'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                query: Joi.object({
-                    force: Joi.boolean()
-                        .truthy('Y', 'true', '1')
-                        .falsy('N', 'false', 0)
-                        .default(false)
-                        .description('Delete message even if not in Trash')
-                        .label('ForceDelete')
-                }).label('MessageDeleteQuery'),
-
-                params: Joi.object({
-                    account: accountIdSchema.required(),
-                    message: Joi.string().max(256).required().example('AAAAAQAACnA').description('Message ID')
-                }).label('MessageDelete')
-            },
-            response: {
-                schema: Joi.object({
-                    deleted: Joi.boolean().example(false).description('Was the delete action executed'),
-                    moved: Joi.object({
-                        destination: Joi.string().required().example('Trash').description('Trash folder path').label('TrashPath'),
-                        message: Joi.string().required().example('AAAAAwAAAWg').description('Message ID in Trash').label('TrashMessageId')
-                    }).description('Present if message was moved to Trash')
-                }).label('MessageDeleteResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'PUT',
-        path: '/v1/account/{account}/messages/delete',
-
-        async handler(request) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.deleteMessages(request.query.path, request.payload.search, request.query.force);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Delete messages',
-            notes: 'Move messages to Trash or delete these if already in Trash',
-            tags: ['api', 'Multi Message Actions'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-
-                query: Joi.object({
-                    path: Joi.string().empty('').required().example('INBOX').description('Mailbox folder path'),
-                    force: Joi.boolean()
-                        .truthy('Y', 'true', '1')
-                        .falsy('N', 'false', 0)
-                        .default(false)
-                        .description('Delete messages even if not in Trash')
-                        .label('ForceDelete')
-                }).label('MessagesDeleteQuery'),
-
-                payload: Joi.object({
-                    search: searchSchema
-                }).label('MessagesDeleteRequest')
-            },
-
-            response: {
-                schema: Joi.object({
-                    deleted: Joi.boolean().example(false).description('Was the delete action executed'),
-                    moved: Joi.object({
-                        destination: Joi.string().required().example('Trash').description('Trash folder path').label('TrashPath'),
-                        idMap: Joi.array()
-                            .items(Joi.array().length(2).items(Joi.string().max(256).required().description('Message ID')))
-                            .example([['AAAAAQAACnA', 'AAAAAwAAAD4']])
-                            .description('An optional map of source and target ID values, if the server provided this info')
-                    }).description('Present if messages were moved to Trash')
-                }).label('MessagesDeleteResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'GET',
-        path: '/v1/account/{account}/text/{text}',
-
-        async handler(request, h) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                esClient: await h.getESClient(request.logger),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.getText(request.params.text, request.query);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Retrieve message text',
-            notes: 'Retrieves message text',
-            tags: ['api', 'Message'],
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                query: Joi.object({
-                    maxBytes: Joi.number()
-                        .integer()
-                        .min(0)
-                        .max(1024 * 1024 * 1024)
-                        .example(MAX_ATTACHMENT_SIZE)
-                        .description('Max length of text content. This setting is ignored if `documentStore` is `true`.'),
-                    textType: Joi.string()
-                        .lowercase()
-                        .valid('html', 'plain', '*')
-                        .default('*')
-                        .example('*')
-                        .description('Which text content to return, use * for all. By default all contents are returned.'),
-                    documentStore: documentStoreSchema.default(false)
-                }),
-
-                params: Joi.object({
-                    account: accountIdSchema.required(),
-                    text: Joi.string()
-                        .base64({ paddingRequired: false, urlSafe: true })
-                        .max(10 * 1024)
-                        .required()
-                        .example('AAAAAQAACnAcdfaaN')
-                        .description('Message text ID')
-                }).label('Text')
-            },
-
-            response: {
-                schema: Joi.object({
-                    plain: Joi.string().example('Hello world').description('Plaintext content'),
-                    html: Joi.string().example('<p>Hello world</p>').description('HTML content'),
-                    hasMore: Joi.boolean().example(false).description('Is the current text output capped or not')
-                }).label('TextResponse'),
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'GET',
-        path: '/v1/account/{account}/messages',
-
-        async handler(request, h) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                esClient: await h.getESClient(request.logger),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            try {
-                return await accountObject.listMessages(request.query);
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'List messages in a folder',
-            notes: 'Lists messages in a mailbox folder',
-            tags: ['api', 'Message'],
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required().label('AccountId')
-                }),
-
-                query: Joi.object({
-                    path: Joi.string().required().example('INBOX').description('Mailbox folder path').label('Path'),
-                    page: Joi.number()
-                        .integer()
-                        .min(0)
-                        .max(1024 * 1024)
-                        .default(0)
-                        .example(0)
-                        .description('Page number (zero indexed, so use 0 for first page)')
-                        .label('PageNumber'),
-                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page').label('PageSize'),
-                    documentStore: documentStoreSchema.default(false)
-                }).label('MessageQuery')
-            },
-
-            response: {
-                schema: messageListSchema,
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'POST',
-        path: '/v1/account/{account}/search',
-
-        async handler(request, h) {
-            let accountObject = new Account({
-                redis,
-                account: request.params.account,
-                call,
-                secret: await getSecret(),
-                esClient: await h.getESClient(request.logger),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            let extraValidationErrors = [];
-
-            if (request.query.documentStore) {
-                for (let key of ['seq', 'modseq']) {
-                    if (request.payload.search && key in request.payload.search) {
-                        extraValidationErrors.push({ message: 'Not allowed with documentStore', context: { key } });
-                    }
-                }
-            } else {
-                for (let key of ['documentQuery']) {
-                    if (key in request.payload) {
-                        extraValidationErrors.push({ message: 'Not allowed without documentStore', context: { key } });
-                    }
-                }
-            }
-
-            if (extraValidationErrors.length) {
-                let error = new Error('Input validation failed');
-                error.details = extraValidationErrors;
-                return failAction(request, h, error);
-            }
-
-            try {
-                return await accountObject.searchMessages(Object.assign(request.query, request.payload));
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Search for messages',
-            notes: 'Filter messages from a mailbox folder by search options. Search is performed against a specific folder and not for the entire account.',
-            tags: ['api', 'Message'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                params: Joi.object({
-                    account: accountIdSchema.required()
-                }),
-
-                query: Joi.object({
-                    path: Joi.string()
-                        .when('documentStore', {
-                            is: true,
-                            then: Joi.optional(),
-                            otherwise: Joi.required()
-                        })
-                        .example('INBOX')
-                        .description('Mailbox folder path. Not required if `documentStore` is `true`'),
-                    page: Joi.number()
-                        .integer()
-                        .min(0)
-                        .max(1024 * 1024)
-                        .default(0)
-                        .example(0)
-                        .description('Page number (zero indexed, so use 0 for first page)'),
-                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page'),
-                    documentStore: documentStoreSchema.default(false),
-                    exposeQuery: Joi.boolean()
-                        .truthy('Y', 'true', '1')
-                        .falsy('N', 'false', 0)
-                        .description('If enabled then returns the ElasticSearch query for debugging as part of the response')
-                        .label('exposeQuery')
-                        .when('documentStore', {
-                            is: true,
-                            then: Joi.optional(),
-                            otherwise: Joi.forbidden()
-                        })
-                }),
-
-                payload: Joi.object({
-                    search: searchSchema,
-                    documentQuery: Joi.object().min(1).description('Document Store query. Only allowed with `documentStore`.').label('DocumentQuery').unknown()
-                }).label('SearchQuery')
-            },
-
-            response: {
-                schema: messageListSchema,
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
-        method: 'POST',
-        path: '/v1/unified/search',
-
-        async handler(request, h) {
-            let accountObject = new Account({
-                redis,
-                call,
-                secret: await getSecret(),
-                esClient: await h.getESClient(request.logger),
-                timeout: request.headers['x-ee-timeout']
-            });
-
-            let extraValidationErrors = [];
-
-            for (let key of ['seq', 'modseq']) {
-                if (request.payload.search && key in request.payload.search) {
-                    extraValidationErrors.push({ message: 'Not allowed with documentStore', context: { key } });
-                }
-            }
-
-            if (extraValidationErrors.length) {
-                let error = new Error('Input validation failed');
-                error.details = extraValidationErrors;
-                return failAction(request, h, error);
-            }
-
-            let documentStoreEnabled = await settings.get('documentStoreEnabled');
-            if (!documentStoreEnabled) {
-                let error = new Error('Document store not enabled');
-                error.details = extraValidationErrors;
-                return failAction(request, h, error);
-            }
-
-            try {
-                return await accountObject.searchMessages(Object.assign({ documentStore: true }, request.query, request.payload), { unified: true });
-            } catch (err) {
-                request.logger.error({ msg: 'API request failed', err });
-                if (Boom.isBoom(err)) {
-                    throw err;
-                }
-                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
-                if (err.code) {
-                    error.output.payload.code = err.code;
-                }
-                throw error;
-            }
-        },
-        options: {
-            description: 'Unified search for messages',
-            notes: 'Filter messages from the Document Store for multiple accounts or paths. Document Store must be enabled for the unified search to work.',
-            tags: ['api', 'Message'],
-
-            plugins: {},
-
-            auth: {
-                strategy: 'api-token',
-                mode: 'required'
-            },
-            cors: CORS_CONFIG,
-
-            validate: {
-                options: {
-                    stripUnknown: false,
-                    abortEarly: false,
-                    convert: true
-                },
-                failAction,
-
-                query: Joi.object({
-                    page: Joi.number()
-                        .integer()
-                        .min(0)
-                        .max(1024 * 1024)
-                        .default(0)
-                        .example(0)
-                        .description('Page number (zero indexed, so use 0 for first page)'),
-                    pageSize: Joi.number().integer().min(1).max(1000).default(20).example(20).description('How many entries per page'),
-                    exposeQuery: Joi.boolean()
-                        .truthy('Y', 'true', '1')
-                        .falsy('N', 'false', 0)
-                        .description('If enabled then returns the ElasticSearch query for debugging as part of the response')
-                        .label('exposeQuery')
-                        .optional()
-                }),
-
-                payload: Joi.object({
-                    accounts: Joi.array()
-                        .items(Joi.string().empty('').trim().max(256).example('example'))
-                        .single()
-                        .description('Optional list of account ID values')
-                        .label('UnifiedSearchAccounts'),
-                    paths: Joi.array()
-                        .items(Joi.string().optional().example('INBOX'))
-                        .single()
-                        .description('Optional list of mailbox folder paths or specialUse flags')
-                        .label('UnifiedSearchPaths'),
-                    search: searchSchema,
-                    documentQuery: Joi.object().min(1).description('Document Store query').label('DocumentQuery').unknown()
-                }).label('UnifiedSearchQuery')
-            },
-
-            response: {
-                schema: messageListSchema,
-                failAction: 'log'
-            }
-        }
-    });
-
-    server.route({
         method: 'POST',
         path: '/v1/account/{account}/submit',
 
@@ -4609,7 +3255,11 @@ When making API calls remember that requests against the same account are queued
             });
 
             try {
-                return await accountObject.queueMessage(request.payload, { source: 'api' });
+                return await accountObject.queueMessage(request.payload, {
+                    source: 'api',
+                    idempotencyKey: request.headers['idempotency-key'],
+                    useStructuredFormat: request.query.useStructuredFormat
+                });
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
                 if (Boom.isBoom(err)) {
@@ -4627,7 +3277,8 @@ When making API calls remember that requests against the same account are queued
         },
         options: {
             payload: {
-                maxBytes: MAX_BODY_SIZE
+                maxBytes: MAX_BODY_SIZE,
+                timeout: MAX_PAYLOAD_TIMEOUT
             },
 
             description: 'Submit message for delivery',
@@ -4654,48 +3305,36 @@ When making API calls remember that requests against the same account are queued
                     account: accountIdSchema.required()
                 }),
 
+                query: Joi.object({
+                    documentStore: Joi.boolean()
+                        .truthy('Y', 'true', '1')
+                        .falsy('N', 'false', 0)
+                        .default(false)
+                        .description('If enabled then fetch email used as a reference template from the Document Store'),
+                    useStructuredFormat: Joi.boolean()
+                        .truthy('Y', 'true', '1')
+                        .falsy('N', 'false', 0)
+                        .default(false)
+                        .description(
+                            'For MS Graph accounts: If true, uses structured JSON format (respects from field for shared mailboxes, breaks calendar invites and special MIME types). If false, sends as raw MIME (preserves calendar invites, ignores from field). Default is false (raw MIME).'
+                        )
+                }).label('SubmitQuery'),
+
+                headers: Joi.object({
+                    'x-ee-timeout': headerTimeoutSchema,
+                    'idempotency-key': idempotencyKeySchema
+                }).unknown(),
+
                 payload: Joi.object({
-                    reference: Joi.object({
-                        message: Joi.string()
-                            .base64({ paddingRequired: false, urlSafe: true })
-                            .max(256)
-                            .required()
-                            .example('AAAAAQAACnA')
-                            .description('Referenced message ID'),
-                        action: Joi.string().lowercase().valid('forward', 'reply').example('reply').default('reply'),
-                        inline: Joi.boolean()
-                            .truthy('Y', 'true', '1')
-                            .falsy('N', 'false', 0)
-                            .default(false)
-                            .description('If true, then blockquotes the email that is being replied to')
-                            .label('InlineReply'),
-                        forwardAttachments: Joi.boolean()
-                            .truthy('Y', 'true', '1')
-                            .falsy('N', 'false', 0)
-                            .default(false)
-                            .description('If true, then includes attachments in forwarded message')
-                            .when('action', {
-                                is: 'forward',
-                                then: Joi.optional(),
-                                otherwise: Joi.forbidden()
-                            })
-                            .label('ForwardAttachments'),
-                        ignoreMissing: Joi.boolean()
-                            .truthy('Y', 'true', '1')
-                            .falsy('N', 'false', 0)
-                            .default(false)
-                            .description('If true, then processes the email even if the original message is not available anymore')
-                            .label('IgnoreMissing'),
-                        documentStore: documentStoreSchema.default(false)
-                    })
-                        .description('Message reference for a reply or a forward. This is EmailEngine specific ID, not Message-ID header value.')
-                        .label('MessageReference'),
+                    reference: messageReferenceSchema,
 
                     envelope: Joi.object({
                         from: Joi.string().email().allow('').example('sender@example.com'),
-                        to: Joi.array().items(Joi.string().email().required().example('recipient@example.com')).single()
+                        to: Joi.array().items(Joi.string().email().required().example('recipient@example.com')).single().label('SmtpEnvelopeTo')
                     })
-                        .description('Optional SMTP envelope. If not set then derived from message headers.')
+                        .description(
+                            "An optional object specifying the SMTP envelope used during email transmission. If not provided, the envelope is automatically derived from the email's message headers. This is useful when you need the envelope addresses to differ from those in the email headers."
+                        )
                         .label('SMTPEnvelope')
                         .when('mailMerge', {
                             is: Joi.exist().not(false, null),
@@ -4707,7 +3346,7 @@ When making API calls remember that requests against the same account are queued
                         .max(MAX_ATTACHMENT_SIZE)
                         .example('TUlNRS1WZXJzaW9uOiAxLjANClN1YmplY3Q6IGhlbGxvIHdvcmxkDQoNCkhlbGxvIQ0K')
                         .description(
-                            'Base64 encoded email message in rfc822 format. If you provide other keys as well then these will override the values in the raw message.'
+                            'A Base64-encoded email message in RFC 822 format. If you provide other fields along with raw, those fields will override the corresponding values in the raw message.'
                         )
                         .label('RFC822Raw')
                         .when('mailMerge', {
@@ -4715,7 +3354,7 @@ When making API calls remember that requests against the same account are queued
                             then: Joi.forbidden('y')
                         }),
 
-                    from: addressSchema.example({ name: 'From Me', address: 'sender@example.com' }).description('The From address').label('FromAddress'),
+                    from: fromAddressSchema,
 
                     replyTo: Joi.array()
                         .items(addressSchema.label('ReplyToAddress'))
@@ -4764,9 +3403,10 @@ When making API calls remember that requests against the same account are queued
 
                     render: Joi.object({
                         format: Joi.string()
-                            .valid('html', 'mjml', 'markdown')
+                            .valid('html', 'markdown')
                             .default('html')
-                            .description('Markup language for HTML ("html", "markdown" or "mjml")'),
+                            .description('Markup language for HTML ("html" or "markdown")')
+                            .label('RenderFormat'),
                         params: Joi.object().label('RenderValues').description('An object of variables for the template renderer')
                     })
                         .allow(false)
@@ -4774,7 +3414,8 @@ When making API calls remember that requests against the same account are queued
                         .when('mailMerge', {
                             is: Joi.exist().not(false, null),
                             then: Joi.forbidden('y')
-                        }),
+                        })
+                        .label('TemplateRender'),
 
                     mailMerge: Joi.array()
                         .items(
@@ -4811,9 +3452,9 @@ When making API calls remember that requests against the same account are queued
                                     }),
 
                                 contentType: Joi.string().lowercase().max(256).example('image/gif'),
-                                contentDisposition: Joi.string().lowercase().valid('inline', 'attachment'),
+                                contentDisposition: Joi.string().lowercase().valid('inline', 'attachment').label('AttachmentContentDisposition'),
                                 cid: Joi.string().max(256).example('unique-image-id@localhost').description('Content-ID value for embedded images'),
-                                encoding: Joi.string().valid('base64').default('base64'),
+                                encoding: Joi.string().valid('base64').default('base64').label('AttachmentEncoding'),
 
                                 reference: Joi.string()
                                     .base64({ paddingRequired: false, urlSafe: true })
@@ -4821,17 +3462,26 @@ When making API calls remember that requests against the same account are queued
                                     .allow(false, null)
                                     .example('AAAAAQAACnAcde')
                                     .description(
-                                        'Reference an existing attachment ID instead of providing attachment content. If set, then `content` option is not allowed. Otherwise `content` is required.'
+                                        'References an existing attachment by its ID instead of providing new attachment content. If this field is set, the `content` field must not be included. If not set, the `content` field is required.'
                                     )
+                                    .label('AttachmentReference')
                             }).label('UploadAttachment')
                         )
                         .description('List of attachments')
                         .label('UploadAttachmentList'),
 
                     messageId: Joi.string().max(996).example('<test123@example.com>').description('Message ID'),
-                    headers: Joi.object().label('CustomHeaders').description('Custom Headers').unknown(),
+                    headers: Joi.object().label('CustomHeaders').description('Custom Headers').unknown().example({
+                        'X-My-Custom-Header': 'Custom header value'
+                    }),
 
-                    trackingEnabled: Joi.boolean().example(false).description('Should EmailEngine track clicks and opens for this message'),
+                    trackingEnabled: Joi.boolean()
+                        .example(false)
+                        .description('Should EmailEngine track clicks and opens for this message')
+                        .meta({ swaggerHidden: true }),
+
+                    trackOpens: Joi.boolean().example(false).description('Should EmailEngine track opens for this message'),
+                    trackClicks: Joi.boolean().example(false).description('Should EmailEngine track clicks for this message'),
 
                     copy: Joi.boolean()
                         .allow(null)
@@ -4846,7 +3496,7 @@ When making API calls remember that requests against the same account are queued
                         .example('Sent Mail')
                         .description("Upload sent message to this folder. By default the account's Sent Mail folder is used."),
 
-                    locale: Joi.string().empty('').max(100).example('fr').description('Optional locale'),
+                    locale: Joi.string().empty('').max(100).example('fr').description('Optional locale').label('MessageLocale'),
                     tz: Joi.string().empty('').max(100).example('Europe/Tallinn').description('Optional timezone'),
 
                     sendAt: Joi.date().iso().example('2021-07-08T07:06:34.336Z').description('Send message at specified time'),
@@ -4854,7 +3504,7 @@ When making API calls remember that requests against the same account are queued
                         .integer()
                         .example(10)
                         .description('How many delivery attempts to make until message is considered as failed'),
-                    gateway: Joi.string().max(256).example('example').description('Optional SMTP gateway ID for message routing'),
+                    gateway: Joi.string().max(256).example('example').description('Optional SMTP gateway ID for message routing').label('MessageGateway'),
 
                     listId: Joi.string()
                         .hostname()
@@ -4876,14 +3526,16 @@ When making API calls remember that requests against the same account are queued
                             .empty('')
                             .valid('headers', 'full')
                             .required()
-                            .description('Specifies if only headers or the entire body of the message should be included in the response (RET)'),
+                            .description('Specifies if only headers or the entire body of the message should be included in the response (RET)')
+                            .label('DsnReturn'),
                         notify: Joi.array()
                             .single()
                             .items(Joi.string().valid('never', 'success', 'failure', 'delay').label('NotifyEntry'))
-                            .description('Defines the conditions under which a DSN response should be sent'),
+                            .description('Defines the conditions under which a DSN response should be sent')
+                            .label('DsnNotify'),
                         recipient: Joi.string().trim().empty('').email().description('The email address the DSN should be sent (ORCPT)')
                     })
-                        .description('Request DNS notifications')
+                        .description('Request DSN notifications')
                         .label('DSN'),
 
                     baseUrl: Joi.string()
@@ -4895,6 +3547,9 @@ When making API calls remember that requests against the same account are queued
                         })
                         .example('https://customer123.myservice.com')
                         .description('Optional base URL for trackers. This URL must point to your EmailEngine instance.'),
+
+                    proxy: settingsSchema.proxyUrl.description('Optional proxy URL to use when connecting to the SMTP server'),
+                    localAddress: ipSchema.description('Optional local IP address to bind to when connecting to the SMTP server'),
 
                     dryRun: Joi.boolean()
                         .truthy('Y', 'true', '1')
@@ -4910,6 +3565,24 @@ When making API calls remember that requests against the same account are queued
                     .oxor('raw', 'text')
                     .oxor('raw', 'attachments')
                     .label('SubmitMessage')
+                    .example({
+                        to: [
+                            {
+                                name: 'Nyan Cat',
+                                address: 'nyan.cat@example.com'
+                            }
+                        ],
+                        subject: 'What a wonderful message!',
+                        text: 'Hello from myself!',
+                        html: '<p>Hello from myself!</p>',
+                        attachments: [
+                            {
+                                filename: 'transparent.gif',
+                                content: 'R0lGODlhAQABAIAAAP///wAAACwAAAAAAQABAAACAkQBADs=',
+                                contentType: 'image/gif'
+                            }
+                        ]
+                    })
             },
 
             response: {
@@ -4930,8 +3603,9 @@ When making API calls remember that requests against the same account are queued
                             .description('Referenced message ID'),
                         documentStore: Joi.boolean()
                             .example(true)
-                            .description('Was the message dat aloaded from the document store')
-                            .label('ResponseDocumentStore'),
+                            .description('Was the message data loaded from the Document Store')
+                            .label('ResponseDocumentStore')
+                            .meta({ swaggerHidden: true }),
                         success: Joi.boolean().example(true).description('Was the referenced message processed successfully').label('ResponseReferenceSuccess'),
                         error: Joi.string().example('Referenced message was not found').description('An error message if referenced message processing failed')
                     })
@@ -4965,8 +3639,9 @@ When making API calls remember that requests against the same account are queued
                                         .description('Referenced message ID'),
                                     documentStore: Joi.boolean()
                                         .example(true)
-                                        .description('Was the message dat aloaded from the document store')
-                                        .label('ResponseDocumentStore'),
+                                        .description('Was the message data loaded from the Document Store')
+                                        .label('ResponseDocumentStore')
+                                        .meta({ swaggerHidden: true }),
                                     success: Joi.boolean()
                                         .example(true)
                                         .description('Was the referenced message processed successfully')
@@ -4984,7 +3659,9 @@ When making API calls remember that requests against the same account are queued
                                 skipped: Joi.object({
                                     reason: Joi.string().example('unsubscribe').description('Why this message was skipped'),
                                     listId: Joi.string().example('test-list')
-                                }).description('Info about skipped message. If this value is set, then the message was not sent')
+                                })
+                                    .description('Info about skipped message. If this value is set, then the message was not sent')
+                                    .label('SkippedMessageInfo')
                             })
                                 .label('BulkResponseEntry')
                                 .example({
@@ -5127,9 +3804,9 @@ When making API calls remember that requests against the same account are queued
             },
 
             response: {
-                schema: Joi.object({ updated: Joi.array().items(Joi.string().example('notifyHeaders')).description('List of updated setting keys') }).label(
-                    'SettingsResponse'
-                ),
+                schema: Joi.object({
+                    updated: Joi.array().items(Joi.string().example('notifyHeaders')).description('List of updated setting keys').label('UpdatedSettings')
+                }).label('SettingsUpdatedResponse'),
                 failAction: 'log'
             }
         }
@@ -5204,13 +3881,27 @@ When making API calls remember that requests against the same account are queued
                 failAction,
 
                 params: Joi.object({
-                    queue: Joi.string().empty('').trim().valid('notify', 'submit', 'documents').required().example('notify').description('Queue ID')
+                    queue: Joi.string()
+                        .empty('')
+                        .trim()
+                        .valid('notify', 'submit', 'documents')
+                        .required()
+                        .example('notify')
+                        .description('Queue ID')
+                        .label('QueueId')
                 })
             },
 
             response: {
                 schema: Joi.object({
-                    queue: Joi.string().empty('').trim().valid('notify', 'submit', 'documents').required().example('notify').description('Queue ID'),
+                    queue: Joi.string()
+                        .empty('')
+                        .trim()
+                        .valid('notify', 'submit', 'documents')
+                        .required()
+                        .example('notify')
+                        .description('Queue ID')
+                        .label('QueueIdResponse'),
                     jobs: Joi.object({
                         active: Joi.number().integer().example(123).description('Jobs that are currently being processed'),
                         delayed: Joi.number().integer().example(123).description('Jobs that are processed in the future'),
@@ -5294,7 +3985,14 @@ When making API calls remember that requests against the same account are queued
                 failAction,
 
                 params: Joi.object({
-                    queue: Joi.string().empty('').trim().valid('notify', 'submit', 'documents').required().example('notify').description('Queue ID')
+                    queue: Joi.string()
+                        .empty('')
+                        .trim()
+                        .valid('notify', 'submit', 'documents')
+                        .required()
+                        .example('notify')
+                        .description('Queue ID')
+                        .label('QueueIdParam')
                 }),
 
                 payload: Joi.object({
@@ -5304,7 +4002,14 @@ When making API calls remember that requests against the same account are queued
 
             response: {
                 schema: Joi.object({
-                    queue: Joi.string().empty('').trim().valid('notify', 'submit', 'documents').required().example('notify').description('Queue ID'),
+                    queue: Joi.string()
+                        .empty('')
+                        .trim()
+                        .valid('notify', 'submit', 'documents')
+                        .required()
+                        .example('notify')
+                        .description('Queue ID')
+                        .label('QueueIdPutResponse'),
                     paused: Joi.boolean().example(false).description('Is the queue paused or not')
                 }).label('SettingsPutQueueResponse'),
                 failAction: 'log'
@@ -5329,6 +4034,12 @@ When making API calls remember that requests against the same account are queued
                 mode: 'required'
             },
             cors: CORS_CONFIG,
+
+            plugins: {
+                'hapi-swagger': {
+                    produces: ['text/plain']
+                }
+            },
 
             validate: {
                 options: {
@@ -5450,7 +4161,7 @@ When making API calls remember that requests against the same account are queued
                 failAction,
 
                 payload: Joi.object({
-                    mailboxes: Joi.boolean().example(false).description('Include mailbox listing in response').default(false),
+                    mailboxes: Joi.boolean().example(false).description('Include mailbox listing in response').default(false).label('IncludeMailboxes'),
                     imap: Joi.object(imapSchema).allow(false).description('IMAP configuration').label('ImapConfiguration'),
                     smtp: Joi.object(smtpSchema).allow(false).description('SMTP configuration').label('SmtpConfiguration'),
                     proxy: settingsSchema.proxyUrl,
@@ -5469,7 +4180,7 @@ When making API calls remember that requests against the same account are queued
                             .example('ERR_SSL_WRONG_VERSION_NUMBER')
                             .description('Error code. Only present if success=false')
                             .label('VerifyImapCode')
-                    }),
+                    }).label('VerifyImapResult'),
                     smtp: Joi.object({
                         success: Joi.boolean().example(true).description('Was SMTP account verified').label('VerifySmtpSuccess'),
                         error: Joi.string()
@@ -5480,7 +4191,7 @@ When making API calls remember that requests against the same account are queued
                             .example('ERR_SSL_WRONG_VERSION_NUMBER')
                             .description('Error code. Only present if success=false')
                             .label('VerifySmtpCode')
-                    }),
+                    }).label('VerifySmtpResult'),
                     mailboxes: shortMailboxesSchema
                 }).label('VerifyAccountResponse'),
                 failAction: 'log'
@@ -5648,7 +4359,7 @@ When making API calls remember that requests against the same account are queued
 
         async handler(request) {
             try {
-                let serverSettings = await autodetectImapSettings(request.query.email);
+                let serverSettings = await autodetectImapSettings(request.query.email, request.app.gt);
                 return serverSettings;
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
@@ -5789,55 +4500,67 @@ When making API calls remember that requests against the same account are queued
                     page: Joi.number().integer().example(0).description('Current page (0-based index)').label('PageNumber'),
                     pages: Joi.number().integer().example(24).description('Total page count').label('PagesNumber'),
 
-                    messages: Joi.array()
-                        .items(
-                            Joi.object({
-                                queueId: Joi.string().example('1869c5692565f756b33').description('Outbox queue ID'),
-                                account: accountIdSchema.required(),
-                                source: Joi.string().example('smtp').valid('smtp', 'api').description('How this message was added to the queue'),
-
-                                messageId: Joi.string().max(996).example('<test123@example.com>').description('Message ID'),
-                                envelope: Joi.object({
-                                    from: Joi.string().email().allow('').example('sender@example.com'),
-                                    to: Joi.array().items(Joi.string().email().required().example('recipient@example.com'))
-                                }).description('SMTP envelope'),
-
-                                subject: Joi.string()
-                                    .allow('')
-                                    .max(10 * 1024)
-                                    .example('What a wonderful message')
-                                    .description('Message subject'),
-
-                                created: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('The time this message was queued'),
-                                scheduled: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('When this message is supposed to be delivered'),
-                                nextAttempt: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('Next delivery attempt'),
-
-                                attemptsMade: Joi.number().integer().example(3).description('How many times EmailEngine has tried to deliver this email'),
-                                attempts: Joi.number()
-                                    .integer()
-                                    .example(3)
-                                    .description('How many delivery attempts to make until message is considered as failed'),
-
-                                progress: Joi.object({
-                                    status: Joi.string()
-                                        .valid('queued', 'processing', 'submitted', 'error')
-                                        .example('queued')
-                                        .description('Current state of the sending'),
-                                    response: Joi.string()
-                                        .example('250 Message Accepted')
-                                        .description('Response from the SMTP server. Only if state=processing'),
-                                    error: Joi.object({
-                                        message: Joi.string().example('Authentication failed').description('Error message'),
-                                        code: Joi.string().example('EAUTH').description('Error code'),
-                                        statusCode: Joi.string().example(502).description('SMTP response code')
-                                    })
-                                        .label('OutboxListProgressError')
-                                        .description('Error information if state=error')
-                                }).label('OutboxListProgress')
-                            }).label('OutboxListItem')
-                        )
-                        .label('OutboxListEntries')
+                    messages: Joi.array().items(outboxEntrySchema).label('OutboxListEntries')
                 }).label('OutboxListResponse'),
+                failAction: 'log'
+            }
+        }
+    });
+
+    server.route({
+        method: 'GET',
+        path: '/v1/outbox/{queueId}',
+
+        async handler(request) {
+            try {
+                let outboxEntry = await outbox.get({ queueId: request.params.queueId, logger });
+                if (!outboxEntry) {
+                    let message = 'Requested queue entry was not found';
+                    let error = Boom.boomify(new Error(message), { statusCode: 404 });
+                    throw error;
+                }
+                return outboxEntry;
+            } catch (err) {
+                request.logger.error({ msg: 'API request failed', err });
+                if (Boom.isBoom(err)) {
+                    throw err;
+                }
+                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
+                if (err.code) {
+                    error.output.payload.code = err.code;
+                }
+                throw error;
+            }
+        },
+
+        options: {
+            description: 'Get queued message',
+            notes: 'Gets a queued message in the Outbox',
+            tags: ['api', 'Outbox'],
+
+            plugins: {},
+
+            auth: {
+                strategy: 'api-token',
+                mode: 'required'
+            },
+            cors: CORS_CONFIG,
+
+            validate: {
+                options: {
+                    stripUnknown: false,
+                    abortEarly: false,
+                    convert: true
+                },
+                failAction,
+
+                params: Joi.object({
+                    queueId: Joi.string().max(100).example('d41f0423195f271f').description('Queue identifier for scheduled email').required()
+                }).label('OutboxEntryParams')
+            },
+
+            response: {
+                schema: outboxEntrySchema,
                 failAction: 'log'
             }
         }
@@ -5887,7 +4610,7 @@ When making API calls remember that requests against the same account are queued
 
                 params: Joi.object({
                     queueId: Joi.string().max(100).example('d41f0423195f271f').description('Queue identifier for scheduled email').required()
-                }).label('DeleteOutboxEntry')
+                }).label('OutboxEntryParams')
             },
 
             response: {
@@ -5904,6 +4627,34 @@ When making API calls remember that requests against the same account are queued
 
     // setup "chat with email" routes
     await chatRoutes({ server, call, CORS_CONFIG });
+
+    // setup account CRUD routes
+    await accountRoutes({
+        server,
+        call,
+        documentsQueue,
+        oauth2Schema,
+        imapSchema,
+        smtpSchema,
+        CORS_CONFIG,
+        AccountTypeSchema
+    });
+
+    // setup message routes
+    await messageRoutes({
+        server,
+        call,
+        CORS_CONFIG,
+        MAX_ATTACHMENT_SIZE,
+        MAX_BODY_SIZE,
+        MAX_PAYLOAD_TIMEOUT
+    });
+
+    // setup export routes
+    await exportRoutes({
+        server,
+        CORS_CONFIG
+    });
 
     server.route({
         method: 'GET',
@@ -6069,7 +4820,7 @@ When making API calls remember that requests against the same account are queued
                 let response = await oauth2Apps.list(request.query.page, request.query.pageSize);
 
                 for (let app of response.apps) {
-                    for (let secretKey of ['clientSecret', 'serviceKey']) {
+                    for (let secretKey of ['clientSecret', 'serviceKey', 'accessToken']) {
                         if (app[secretKey]) {
                             app[secretKey] = '******';
                         }
@@ -6153,11 +4904,7 @@ When making API calls remember that requests against the same account are queued
                                 name: Joi.string().max(256).example('My OAuth2 App').description('Display name for the app'),
                                 description: Joi.string().empty('').trim().max(1024).example('App description').description('OAuth2 application description'),
                                 title: Joi.string().empty('').trim().max(256).example('App title').description('Title for the application button'),
-                                provider: Joi.string()
-                                    .valid(...Object.keys(OAUTH_PROVIDERS))
-                                    .required()
-                                    .example('gmail')
-                                    .description('OAuth2 provider'),
+                                provider: OAuth2ProviderSchema,
                                 enabled: Joi.boolean()
                                     .truthy('Y', 'true', '1', 'on')
                                     .falsy('N', 'false', 0, '')
@@ -6179,7 +4926,8 @@ When making API calls remember that requests against the same account are queued
 
                                 clientId: Joi.string()
                                     .example('4f05f488-d858-4f2c-bd12-1039062612fe')
-                                    .description('Client or Application ID for 3-legged OAuth2 applications'),
+                                    .description('Client or Application ID for 3-legged OAuth2 applications')
+                                    .label('OAuth2AppListClientId'),
                                 clientSecret: Joi.string()
                                     .example('******')
                                     .description('Client secret for 3-legged OAuth2 applications. Actual value is not revealed.'),
@@ -6190,9 +4938,24 @@ When making API calls remember that requests against the same account are queued
                                         allowRelative: false
                                     })
                                     .example('https://myservice.com/oauth')
-                                    .description('Redirect URL for 3-legged OAuth2 applications'),
+                                    .description('Redirect URL for 3-legged OAuth2 applications')
+                                    .label('OAuth2AppListRedirectUrl'),
 
-                                serviceClient: Joi.string().example('9103965568215821627203').description('Service client ID for 2-legged OAuth2 applications'),
+                                serviceClient: Joi.string()
+                                    .example('9103965568215821627203')
+                                    .description('Service client ID for 2-legged OAuth2 applications')
+                                    .label('OAuth2AppListServiceClient'),
+
+                                googleProjectId: googleProjectIdSchema,
+                                googleWorkspaceAccounts: googleWorkspaceAccountsSchema,
+                                googleTopicName: googleTopicNameSchema,
+                                googleSubscriptionName: googleSubscriptionNameSchema,
+
+                                serviceClientEmail: Joi.string()
+                                    .email()
+                                    .example('name@project-123.iam.gserviceaccount.com')
+                                    .description('Service Client Email for 2-legged OAuth2 applications'),
+
                                 serviceKey: Joi.string()
                                     .example('******')
                                     .description('PEM formatted service secret for 2-legged OAuth2 applications. Actual value is not revealed.'),
@@ -6216,7 +4979,7 @@ When making API calls remember that requests against the same account are queued
                 let app = await oauth2Apps.get(request.params.app);
 
                 // remove secrets
-                for (let secretKey of ['clientSecret', 'serviceKey']) {
+                for (let secretKey of ['clientSecret', 'serviceKey', 'accessToken']) {
                     if (app[secretKey]) {
                         app[secretKey] = '******';
                     }
@@ -6281,11 +5044,7 @@ When making API calls remember that requests against the same account are queued
                     name: Joi.string().max(256).example('My OAuth2 App').description('Display name for the app'),
                     description: Joi.string().empty('').trim().max(1024).example('App description').description('OAuth2 application description'),
                     title: Joi.string().empty('').trim().max(256).example('App title').description('Title for the application button'),
-                    provider: Joi.string()
-                        .valid(...Object.keys(OAUTH_PROVIDERS))
-                        .required()
-                        .example('gmail')
-                        .description('OAuth2 provider'),
+                    provider: OAuth2ProviderSchema,
                     enabled: Joi.boolean()
                         .truthy('Y', 'true', '1', 'on')
                         .falsy('N', 'false', 0, '')
@@ -6307,7 +5066,8 @@ When making API calls remember that requests against the same account are queued
 
                     clientId: Joi.string()
                         .example('4f05f488-d858-4f2c-bd12-1039062612fe')
-                        .description('Client or Application ID for 3-legged OAuth2 applications'),
+                        .description('Client or Application ID for 3-legged OAuth2 applications')
+                        .label('OAuth2AppGetClientId'),
                     clientSecret: Joi.string().example('******').description('Client secret for 3-legged OAuth2 applications. Actual value is not revealed.'),
                     authority: Joi.string().example('common').description('Authorization tenant value for Outlook OAuth2 applications'),
                     redirectUrl: Joi.string()
@@ -6316,9 +5076,24 @@ When making API calls remember that requests against the same account are queued
                             allowRelative: false
                         })
                         .example('https://myservice.com/oauth')
-                        .description('Redirect URL for 3-legged OAuth2 applications'),
+                        .description('Redirect URL for 3-legged OAuth2 applications')
+                        .label('OAuth2AppGetRedirectUrl'),
 
-                    serviceClient: Joi.string().example('9103965568215821627203').description('Service client ID for 2-legged OAuth2 applications'),
+                    googleProjectId: googleProjectIdSchema,
+                    googleWorkspaceAccounts: googleWorkspaceAccountsSchema,
+                    googleTopicName: googleTopicNameSchema,
+                    googleSubscriptionName: googleSubscriptionNameSchema,
+
+                    serviceClientEmail: Joi.string()
+                        .email()
+                        .example('name@project-123.iam.gserviceaccount.com')
+                        .description('Service Client Email for 2-legged OAuth2 applications'),
+
+                    serviceClient: Joi.string()
+                        .example('9103965568215821627203')
+                        .description('Service client ID for 2-legged OAuth2 applications')
+                        .label('OAuth2AppGetServiceClient'),
+
                     serviceKey: Joi.string()
                         .example('******')
                         .description('PEM formatted service secret for 2-legged OAuth2 applications. Actual value is not revealed.'),
@@ -6342,6 +5117,11 @@ When making API calls remember that requests against the same account are queued
         async handler(request) {
             try {
                 let result = await oauth2Apps.create(request.payload);
+
+                if (result && result.pubsubUpdates && result.pubsubUpdates.pubSubSubscription) {
+                    await call({ cmd: 'googlePubSub', app: result.id });
+                }
+
                 return result;
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
@@ -6396,7 +5176,13 @@ When making API calls remember that requests against the same account are queued
 
         async handler(request) {
             try {
-                return await oauth2Apps.update(request.params.app, request.payload);
+                let result = await oauth2Apps.update(request.params.app, request.payload);
+
+                if (result && result.pubsubUpdates && result.pubsubUpdates.pubSubSubscription) {
+                    await call({ cmd: 'googlePubSub', app: result.id });
+                }
+
+                return result;
             } catch (err) {
                 request.logger.error({ msg: 'API request failed', err });
                 if (Boom.isBoom(err)) {
@@ -6446,7 +5232,8 @@ When making API calls remember that requests against the same account are queued
                         .allow('', null, false)
                         .max(256)
                         .example('52422112755-3uov8bjwlrullq122rdm6l8ui25ho7qf.apps.googleusercontent.com')
-                        .description('Client or Application ID for 3-legged OAuth2 applications'),
+                        .description('Client or Application ID for 3-legged OAuth2 applications')
+                        .label('UpdateOAuth2ClientId'),
 
                     clientSecret: Joi.string()
                         .trim()
@@ -6455,23 +5242,41 @@ When making API calls remember that requests against the same account are queued
                         .example('boT7Q~dUljnfFdVuqpC11g8nGMjO8kpRAv-ZB')
                         .description('Client secret for 3-legged OAuth2 applications'),
 
-                    baseScopes: Joi.string()
+                    pubSubApp: Joi.string()
                         .empty('')
-                        .trim()
-                        .valid(...['imap'].concat(featureFlags.enabled('gmail api') ? 'api' : []))
-                        .example('imap')
-                        .description('OAuth2 Base Scopes'),
+                        .base64({ paddingRequired: false, urlSafe: true })
+                        .max(512)
+                        .example('AAAAAQAACnA')
+                        .description('Cloud Pub/Sub app for Gmail API webhooks')
+                        .label('UpdatePubSubAppId'),
 
-                    extraScopes: Joi.array().items(Joi.string().trim().max(255).example('User.Read')).description('OAuth2 Extra Scopes'),
+                    extraScopes: Joi.array()
+                        .items(Joi.string().trim().max(255).example('User.Read').label('UpdateExtraScopeEntry'))
+                        .description('OAuth2 Extra Scopes')
+                        .label('UpdateOAuth2ExtraScopes'),
 
-                    skipScopes: Joi.array().items(Joi.string().trim().max(255).example('SMTP.Send')).description('OAuth2 scopes to skip from the base set'),
+                    skipScopes: Joi.array()
+                        .items(Joi.string().trim().max(255).example('SMTP.Send').label('UpdateSkipScopeEntry'))
+                        .description('OAuth2 scopes to skip from the base set')
+                        .label('UpdateOAuth2SkipScopes'),
 
                     serviceClient: Joi.string()
                         .trim()
                         .allow('', null, false)
                         .max(256)
                         .example('7103296518315821565203')
-                        .description('Service client ID for 2-legged OAuth2 applications'),
+                        .description('Service client ID for 2-legged OAuth2 applications')
+                        .label('UpdateServiceClient'),
+
+                    googleProjectId: googleProjectIdSchema,
+                    googleWorkspaceAccounts: googleWorkspaceAccountsSchema,
+                    googleTopicName: googleTopicNameSchema,
+                    googleSubscriptionName: googleSubscriptionNameSchema,
+
+                    serviceClientEmail: Joi.string()
+                        .email()
+                        .example('name@project-123.iam.gserviceaccount.com')
+                        .description('Service Client Email for 2-legged OAuth2 applications'),
 
                     serviceKey: Joi.string()
                         .trim()
@@ -6488,18 +5293,29 @@ When making API calls remember that requests against the same account are queued
                         .description('Authorization tenant value for Outlook OAuth2 applications')
                         .label('SupportedAccountTypes'),
 
+                    cloud: Joi.string()
+                        .trim()
+                        .empty('')
+                        .valid('global', 'gcc-high', 'dod', 'china')
+                        .example('global')
+                        .description('Azure cloud type for Outlook OAuth2 applications')
+                        .label('AzureCloud'),
+
+                    tenant: Joi.string().trim().empty('').max(1024).example('f8cdef31-a31e-4b4a-93e4-5f571e91255a').label('Directorytenant'),
+
                     redirectUrl: Joi.string()
                         .allow('', null, false)
                         .uri({ scheme: ['http', 'https'], allowRelative: false })
                         .example('https://myservice.com/oauth')
                         .description('Redirect URL for 3-legged OAuth2 applications')
-                }).label('UpdateGateway')
+                        .label('UpdateOAuth2RedirectUrl')
+                }).label('UpdateOAuthApp')
             },
 
             response: {
                 schema: Joi.object({
-                    gateway: Joi.string().max(256).required().example('example').description('Gateway ID')
-                }).label('UpdateGatewayResponse'),
+                    id: Joi.string().max(256).required().example('example').description('OAuth2 app ID')
+                }).label('UpdateOAuthAppResponse'),
                 failAction: 'log'
             }
         }
@@ -6553,7 +5369,7 @@ When making API calls remember that requests against the same account are queued
             response: {
                 schema: Joi.object({
                     id: Joi.string().max(256).required().example('AAABhaBPHscAAAAH').description('OAuth2 application ID'),
-                    deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the gateway deleted'),
+                    deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the OAuth2 application deleted'),
                     accounts: Joi.number()
                         .integer()
                         .example(12)
@@ -6710,8 +5526,8 @@ When making API calls remember that requests against the same account are queued
                     deliveries: Joi.number().integer().empty('').example(100).description('Count of email deliveries using this gateway'),
                     lastUse: Joi.date().iso().example('2021-02-17T13:43:18.860Z').description('Last delivery time'),
 
-                    user: Joi.string().empty('').trim().max(1024).label('UserName'),
-                    pass: Joi.string().empty('').max(1024).label('Password'),
+                    user: Joi.string().empty('').trim().max(1024).description('SMTP authentication username').label('UserName'),
+                    pass: Joi.string().empty('').max(1024).description('SMTP authentication password').label('Password'),
 
                     host: Joi.string().hostname().example('smtp.gmail.com').description('Hostname to connect to').label('Hostname'),
                     port: Joi.number()
@@ -6728,7 +5544,7 @@ When making API calls remember that requests against the same account are queued
                         .default(false)
                         .example(true)
                         .description('Should connection use TLS. Usually true for port 465')
-                        .label('TLS'),
+                        .label('GatewayTlsOptions'),
 
                     lastError: lastErrorSchema.allow(null)
                 }).label('GatewayResponse'),
@@ -6786,8 +5602,8 @@ When making API calls remember that requests against the same account are queued
 
                     name: Joi.string().empty('').max(256).example('John Smith').description('Account Name').label('Gateway Name').required(),
 
-                    user: Joi.string().empty('').trim().default(null).max(1024).label('UserName'),
-                    pass: Joi.string().empty('').max(1024).default(null).label('Password'),
+                    user: Joi.string().empty('').trim().default(null).max(1024).description('SMTP authentication username').label('UserName'),
+                    pass: Joi.string().empty('').max(1024).default(null).description('SMTP authentication password').label('Password'),
 
                     host: Joi.string().hostname().example('smtp.gmail.com').description('Hostname to connect to').label('Hostname').required(),
                     port: Joi.number()
@@ -6805,14 +5621,19 @@ When making API calls remember that requests against the same account are queued
                         .default(false)
                         .example(true)
                         .description('Should connection use TLS. Usually true for port 465')
-                        .label('TLS')
+                        .label('GatewayCreateTlsOptions')
                 }).label('CreateGateway')
             },
 
             response: {
                 schema: Joi.object({
                     gateway: Joi.string().max(256).required().example('example').description('Gateway ID'),
-                    state: Joi.string().required().valid('existing', 'new').example('new').description('Is the gateway new or updated existing')
+                    state: Joi.string()
+                        .required()
+                        .valid('existing', 'new')
+                        .example('new')
+                        .description('Is the gateway new or updated existing')
+                        .label('CreateGatewayState')
                 }).label('CreateGatewayResponse'),
                 failAction: 'log'
             }
@@ -6868,8 +5689,8 @@ When making API calls remember that requests against the same account are queued
                 payload: Joi.object({
                     name: Joi.string().empty('').max(256).example('John Smith').description('Account Name').label('Gateway Name'),
 
-                    user: Joi.string().empty('').trim().max(1024).allow(null).label('UserName'),
-                    pass: Joi.string().empty('').max(1024).allow(null).label('Password'),
+                    user: Joi.string().empty('').trim().max(1024).allow(null).description('SMTP authentication username').label('UserName'),
+                    pass: Joi.string().empty('').max(1024).allow(null).description('SMTP authentication password').label('Password'),
 
                     host: Joi.string().hostname().empty('').example('smtp.gmail.com').description('Hostname to connect to').label('Hostname'),
                     port: Joi.number()
@@ -6886,7 +5707,7 @@ When making API calls remember that requests against the same account are queued
                         .falsy('N', 'false', 0, '')
                         .example(true)
                         .description('Should connection use TLS. Usually true for port 465')
-                        .label('TLS')
+                        .label('GatewayUpdateTlsOptions')
                 }).label('UpdateGateway')
             },
 
@@ -6954,7 +5775,7 @@ When making API calls remember that requests against the same account are queued
                 schema: Joi.object({
                     gateway: Joi.string().max(256).required().example('example').description('Gateway ID'),
                     deleted: Joi.boolean().truthy('Y', 'true', '1').falsy('N', 'false', 0).default(true).description('Was the gateway deleted')
-                }).label('DeleteRequestResponse'),
+                }).label('DeleteGatewayResponse'),
                 failAction: 'log'
             }
         }
@@ -6981,8 +5802,20 @@ When making API calls remember that requests against the same account are queued
             });
 
             try {
-                return await accountObject.getActiveAccessTokenData();
+                const tokenData = await accountObject.getActiveAccessTokenData();
+
+                // Record metric if token was actually refreshed (not cached)
+                if (!tokenData.cached) {
+                    const provider = tokenData.provider || 'unknown';
+                    metrics(request.logger, 'oauth2TokenRefresh', 'inc', { status: 'success', provider, statusCode: '200' });
+                }
+
+                return tokenData;
             } catch (err) {
+                // Record failed token refresh
+                const statusCode = String(err.statusCode || 0);
+                metrics(request.logger, 'oauth2TokenRefresh', 'inc', { status: 'failure', provider: 'unknown', statusCode });
+
                 request.logger.error({ msg: 'API request failed', err });
                 if (Boom.isBoom(err)) {
                     throw err;
@@ -7024,9 +5857,77 @@ When making API calls remember that requests against the same account are queued
                 schema: Joi.object({
                     account: accountIdSchema.required(),
                     user: Joi.string().max(256).required().example('user@example.com').description('Username'),
-                    accessToken: Joi.string().max(256).required().example('aGVsbG8gd29ybGQ=').description('Access Token'),
-                    provider: Joi.string().max(256).example('gmail').description('OAuth2 provider')
+                    accessToken: Joi.string().max(256).required().example('aGVsbG8gd29ybGQ=').description('Access Token').label('OAuthAccessToken'),
+                    provider: OAuth2ProviderSchema
                 }).label('AccountTokenResponse'),
+                failAction: 'log'
+            }
+        }
+    });
+
+    server.route({
+        method: 'GET',
+        path: '/v1/account/{account}/server-signatures',
+
+        async handler(request) {
+            let accountObject = new Account({
+                redis,
+                account: request.params.account,
+                call,
+                secret: await getSecret(),
+                timeout: request.headers['x-ee-timeout']
+            });
+            try {
+                return await accountObject.listSignatures(request.query);
+            } catch (err) {
+                request.logger.error({ msg: 'API request failed', err });
+                if (Boom.isBoom(err)) {
+                    throw err;
+                }
+                let error = Boom.boomify(err, { statusCode: err.statusCode || 500 });
+                if (err.code) {
+                    error.output.payload.code = err.code;
+                }
+                throw error;
+            }
+        },
+
+        options: {
+            description: 'List Account Signatures',
+            notes: 'Returns signatures associated with the account. Currently only Gmail is supported, and only "new message" signatures from the "sendAs" list are returned.',
+            tags: ['api', 'Account'],
+
+            plugins: {},
+
+            auth: {
+                strategy: 'api-token',
+                mode: 'required'
+            },
+            cors: CORS_CONFIG,
+
+            validate: {
+                options: {
+                    stripUnknown: false,
+                    abortEarly: false,
+                    convert: true
+                },
+                failAction,
+                params: Joi.object({
+                    account: accountIdSchema.required()
+                })
+            },
+
+            response: {
+                schema: Joi.object({
+                    signatures: Joi.array()
+                        .items(
+                            Joi.object({
+                                address: Joi.string().email().example('user@example.com').description('Email address associated with the signature').required(),
+                                signature: Joi.string().example('<div>Best regards,</div>').description('Signature HTML code').required()
+                            }).label('SignatureResponseItem')
+                        )
+                        .label('SignatureEntries')
+                }).label('AccountSignaturesResponse'),
                 failAction: 'log'
             }
         }
@@ -7062,7 +5963,7 @@ When making API calls remember that requests against the same account are queued
                         requestor: '@postalsys/emailengine-app'
                     }),
                     headers,
-                    dispatcher: fetchAgent
+                    dispatcher: retryAgent
                 });
 
                 if (!res.ok) {
@@ -7094,7 +5995,7 @@ When making API calls remember that requests against the same account are queued
 
                 if (request.payload.gateway) {
                     // try to load the gateway, throws if not set
-                    let gatewayObject = new Gateway({ redis, gateway: request.params.gateway, call, secret: await getSecret() });
+                    let gatewayObject = new Gateway({ redis, gateway: request.payload.gateway, call, secret: await getSecret() });
                     await gatewayObject.loadGatewayData();
                 }
 
@@ -7173,7 +6074,7 @@ ${now}`,
                 }),
 
                 payload: Joi.object({
-                    gateway: Joi.string().allow(false, null).empty('').max(256).example(false).description('Optional gateway ID')
+                    gateway: Joi.string().allow(false, null).empty('').max(256).example(false).description('Optional gateway ID').label('DeliveryTestGateway')
                 }).label('DeliveryStartRequest')
             },
 
@@ -7215,7 +6116,7 @@ ${now}`,
                 let res = await fetchCmd(`${SMTP_TEST_HOST}/test-address/${request.params.deliveryTest}`, {
                     method: 'get',
                     headers,
-                    dispatcher: fetchAgent
+                    dispatcher: retryAgent
                 });
 
                 if (!res.ok) {
@@ -7319,14 +6220,15 @@ ${now}`,
             response: {
                 schema: Joi.object({
                     success: Joi.boolean().example(true).description('Was the test completed').label('ResponseDeliveryCheckSuccess'),
-                    dkim: Joi.object().unknown().description('DKIM results'),
-                    spf: Joi.object().unknown().description('SPF results'),
-                    dmarc: Joi.object().unknown().description('DMARC results'),
-                    bimi: Joi.object().unknown().description('BIMI results'),
-                    arc: Joi.object().unknown().description('ARC results'),
+                    dkim: Joi.object().unknown().description('DKIM results').label('DkimResults'),
+                    spf: Joi.object().unknown().description('SPF results').label('SpfResults'),
+                    dmarc: Joi.object().unknown().description('DMARC results').label('DmarcResults'),
+                    bimi: Joi.object().unknown().description('BIMI results').label('BimiResults'),
+                    arc: Joi.object().unknown().description('ARC results').label('ArcResults'),
                     mainSig: Joi.object()
                         .unknown()
                         .description('Primary DKIM signature. `status.aligned` should be set, otherwise DKIM check should not be considered as passed.')
+                        .label('MainSignature')
                 }).label('DeliveryCheckResponse'),
                 failAction: 'log'
             }
@@ -7703,7 +6605,11 @@ ${now}`,
             notes: 'Stream account state changes as an EventSource',
             tags: ['api', 'Account'],
 
-            plugins: {},
+            plugins: {
+                'hapi-swagger': {
+                    produces: ['text/event-stream']
+                }
+            },
 
             auth: {
                 strategy: 'api-token',
@@ -7764,10 +6670,14 @@ ${now}`,
                 disableTokens,
                 tract,
                 templateHeader: embeddedTemplateHeader,
+                templateHtmlHead: embeddedTemplateHtmlHead,
                 documentStoreEnabled: showDocumentStore,
                 serviceUrl,
                 language,
-                timezone
+                locale,
+                timezone,
+                pageBrandName,
+                notificationBaseUrl
             } = await settings.getMulti(
                 'upgrade',
                 'subexp',
@@ -7779,13 +6689,17 @@ ${now}`,
                 'disableTokens',
                 'tract',
                 'templateHeader',
+                'templateHtmlHead',
                 'documentStoreEnabled',
                 'serviceUrl',
                 'language',
-                'timezone'
+                'locale',
+                'timezone',
+                'pageBrandName',
+                'notificationBaseUrl'
             );
 
-            const systemAlerts = [];
+            let systemAlerts = [];
             let authData;
 
             switch (request.auth.artifacts && request.auth.artifacts.provider) {
@@ -7830,7 +6744,7 @@ ${now}`,
                 });
             }
 
-            if (subexp) {
+            if (subexp && !(request.app.licenseInfo && request.app.licenseInfo.details && request.app.licenseInfo.details.lt)) {
                 let delayMs = new Date(subexp) - Date.now();
                 let expiresDays = Math.max(Math.ceil(delayMs / (24 * 3600 * 1000)), 0);
 
@@ -7874,7 +6788,7 @@ ${now}`,
                     url: '/admin/config/webhooks',
                     level: 'danger',
                     icon: 'link',
-                    message: 'Webhooks are failing, please review'
+                    message: 'Webhook delivery is failing'
                 });
             }
 
@@ -7883,13 +6797,11 @@ ${now}`,
                     url: '/admin/config/license',
                     level: 'warning',
                     icon: 'key',
-                    message: 'License key is not registered'
+                    message: 'No license key registered'
                 });
             }
 
             let licenseDetails = Object.assign({}, (request.app.licenseInfo && request.app.licenseInfo.details) || {});
-
-            let referrerPolicy = licenseDetails.trial ? 'origin' : 'no-referrer';
 
             if (licenseDetails.expires) {
                 let delayMs = new Date(licenseDetails.expires) - Date.now();
@@ -7927,21 +6839,42 @@ ${now}`,
                 });
             }
 
+            // Check if setup warnings should be disabled (for documentation screenshots, CI, etc.)
+            const disableSetupWarnings = hasEnvValue('EENGINE_DISABLE_SETUP_WARNINGS') ? getBoolean(readEnvValue('EENGINE_DISABLE_SETUP_WARNINGS')) : false;
+
+            if (disableSetupWarnings) {
+                // Keep only critical (danger) alerts, suppress info/warning level
+                systemAlerts = systemAlerts.filter(alert => alert.level === 'danger');
+            }
+
             return {
+                pageBrandName: pageBrandName || 'EmailEngine',
                 values: request.payload || {},
                 errors: (request.error && request.error.details) || {},
                 pendingMessages,
                 licenseInfo: request.app.licenseInfo,
                 licenseDetails,
                 trialPossible: !tract,
-                referrerPolicy,
                 authData,
                 packageData,
                 systemAlerts,
                 embeddedTemplateHeader,
+                embeddedTemplateHtmlHead,
                 currentYear: new Date().getFullYear(),
                 showDocumentStore,
-                updateBrowserInfo: !serviceUrl || !language || !timezone
+                updateBrowserInfo: !serviceUrl || !language || !timezone,
+
+                // Suppress large banner warnings when EENGINE_DISABLE_SETUP_WARNINGS is set
+                hideLicenseWarning: disableSetupWarnings,
+                disableAuthWarning: disableSetupWarnings,
+
+                mainServiceUrl: serviceUrl,
+                notificationBaseUrl,
+
+                userLocale: locale,
+                userTimezone: timezone,
+
+                templateLocale: request.app.locale
             };
         }
     });
@@ -7969,8 +6902,8 @@ ${now}`,
         const ctx = {
             message:
                 error.output.statusCode === 404
-                    ? 'page not found'
-                    : (error.output && error.output.payload && error.output.payload.message) || 'something went wrong',
+                    ? request.app.gt.gettext('Requested page not found')
+                    : (error.output && error.output.payload && error.output.payload.message) || request.app.gt.gettext('Something went wrong'),
             details: error.output && error.output.payload && error.output.payload.details
         };
 
@@ -7999,7 +6932,10 @@ ${now}`,
             return res.code(request.errorInfo.statusCode || 500);
         }
 
-        if (/^\/v1\//.test(request.path) || /^\/health$/.test(request.path)) {
+        const tags = (request.route && request.route.settings && request.route.settings.tags) || [];
+        const isApiRoute = tags.includes('api') || tags.includes('test');
+
+        if (isApiRoute) {
             // API path
             return h.response(request.errorInfo).code(request.errorInfo.statusCode || 500);
         }
@@ -8053,26 +6989,11 @@ ${now}`,
         }
     });
 
+    // setup web UI
     routesUi(server, call);
 
-    // Bull-UI
-    const arenaBasePath = '/admin/iframe/arena';
-    await server.register(Hecks);
-    server.route({
-        method: '*',
-        path: `${arenaBasePath}/{expressPath*}`,
-        options: {
-            tags: ['external'],
-            //auth: false,
-            handler: {
-                express: arenaExpress(Object.assign({ connectionName: `${REDIS_CONF.connectionName}[arena]` }, REDIS_CONF), arenaBasePath)
-            },
-            state: {
-                parse: true,
-                failAction: 'error'
-            }
-        }
-    });
+    // setup "Bull board" routes
+    await bullBoardRoutes({ server });
 
     server.route({
         method: 'GET',
@@ -8096,8 +7017,8 @@ ${now}`,
     server.route({
         method: '*',
         path: '/{any*}',
-        async handler() {
-            throw Boom.notFound('Requested page not found'); // 404
+        async handler(request) {
+            throw Boom.notFound(request.app.gt.gettext('Requested page not found')); // 404
         }
     });
 
@@ -8166,6 +7087,17 @@ init()
             maxBodySize: MAX_BODY_SIZE,
             version: packageData.version
         });
+
+        parentPort.postMessage({ cmd: 'ready' });
+
+        // Start sending heartbeats to main thread
+        setInterval(() => {
+            try {
+                parentPort.postMessage({ cmd: 'heartbeat' });
+            } catch (err) {
+                // Ignore errors, parent might be shutting down
+            }
+        }, 10 * 1000).unref();
     })
     .catch(err => {
         logger.error({ msg: 'Failed to initialize API', err });

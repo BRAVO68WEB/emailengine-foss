@@ -3,11 +3,14 @@
 const { parentPort } = require('worker_threads');
 
 const packageData = require('../package.json');
-const config = require('wild-config');
+const config = require('@zone-eu/wild-config');
+const { createHmac } = require('crypto');
 const logger = require('../lib/logger');
 const { webhooks: Webhooks } = require('../lib/webhooks');
 
-const { readEnvValue, threadStats } = require('../lib/tools');
+const { GooglePubSub } = require('../lib/oauth/pubsub/google');
+
+const { readEnvValue, threadStats, getDuration, retryAgent, getServiceSecret } = require('../lib/tools');
 
 const Bugsnag = require('@bugsnag/js');
 if (readEnvValue('BUGSNAG_API_KEY')) {
@@ -36,17 +39,59 @@ const { redis, queueConf } = require('../lib/db');
 const { Worker } = require('bullmq');
 const settings = require('../lib/settings');
 
-const { REDIS_PREFIX, ACCOUNT_DELETED_NOTIFY, MESSAGE_NEW_NOTIFY, FETCH_TIMEOUT } = require('../lib/consts');
+const { REDIS_PREFIX, ACCOUNT_DELETED_NOTIFY, MESSAGE_NEW_NOTIFY } = require('../lib/consts');
 const he = require('he');
 
-const { fetch: fetchCmd, Agent } = require('undici');
-const fetchAgent = new Agent({ connect: { timeout: FETCH_TIMEOUT } });
+const { fetch: fetchCmd } = require('undici');
 
 config.queues = config.queues || {
     notify: 1
 };
 
+const DEFAULT_EENGINE_TIMEOUT = 10 * 1000;
+
+const EENGINE_TIMEOUT = getDuration(readEnvValue('EENGINE_TIMEOUT') || config.service.commandTimeout) || DEFAULT_EENGINE_TIMEOUT;
+
 const NOTIFY_QC = (readEnvValue('EENGINE_NOTIFY_QC') && Number(readEnvValue('EENGINE_NOTIFY_QC'))) || config.queues.notify || 1;
+
+let callQueue = new Map();
+let mids = 0;
+
+async function call(message, transferList) {
+    return new Promise((resolve, reject) => {
+        let mid = `${Date.now()}:${++mids}`;
+
+        let ttl = Math.max(message.timeout || 0, EENGINE_TIMEOUT || 0);
+        let timer = setTimeout(() => {
+            let err = new Error('Timeout waiting for command response [T6]');
+            err.statusCode = 504;
+            err.code = 'Timeout';
+            err.ttl = ttl;
+            reject(err);
+        }, ttl);
+
+        callQueue.set(mid, { resolve, reject, timer });
+
+        try {
+            parentPort.postMessage(
+                {
+                    cmd: 'call',
+                    mid,
+                    message
+                },
+                transferList
+            );
+        } catch (err) {
+            clearTimeout(timer);
+            callQueue.delete(mid);
+            return reject(err);
+        }
+    });
+}
+
+const googlePubSub = new GooglePubSub({
+    call
+});
 
 function getAccountKey(account) {
     return `${REDIS_PREFIX}iad:${account}`;
@@ -69,13 +114,49 @@ async function onCommand(command) {
     switch (command.cmd) {
         case 'resource-usage':
             return threadStats.usage();
+        case 'googlePubSub':
+            await googlePubSub.update(command.app);
+            return true;
         default:
             logger.debug({ msg: 'Unhandled command', command });
             return 999;
     }
 }
 
+// Start sending heartbeats to main thread
+setInterval(() => {
+    try {
+        parentPort.postMessage({ cmd: 'heartbeat' });
+    } catch (err) {
+        // Ignore errors, parent might be shutting down
+    }
+}, 10 * 1000).unref();
+
+// Send initial ready signal
+parentPort.postMessage({ cmd: 'ready' });
+
 parentPort.on('message', message => {
+    if (message && message.cmd === 'resp' && message.mid && callQueue.has(message.mid)) {
+        let { resolve, reject, timer } = callQueue.get(message.mid);
+        clearTimeout(timer);
+        callQueue.delete(message.mid);
+        if (message.error) {
+            let err = new Error(message.error);
+            if (message.code) {
+                err.code = message.code;
+            }
+            if (message.statusCode) {
+                err.statusCode = message.statusCode;
+            }
+            if (message.info) {
+                err.info = message.info;
+            }
+            return reject(err);
+        } else {
+            return resolve(message.response);
+        }
+    }
+
     if (message && message.cmd === 'call' && message.mid) {
         return onCommand(message.message)
             .then(response => {
@@ -105,7 +186,7 @@ const notifyWorker = new Worker(
         let accountKey = getAccountKey(job.data.account);
 
         // validate if we should even process this webhook
-        let accountExists = await redis.exists(accountKey);
+        let accountExists = await redis.hexists(accountKey, 'account');
         if (!accountExists && job.name !== ACCOUNT_DELETED_NOTIFY) {
             logger.debug({
                 msg: 'Account is not enabled',
@@ -143,6 +224,23 @@ const notifyWorker = new Worker(
             return;
         }
 
+        let accountWebhooksCustomHeaders;
+        let accountWebhooksCustomHeadersJson = await redis.hget(accountKey, 'webhooksCustomHeaders');
+        if (accountWebhooksCustomHeadersJson) {
+            try {
+                accountWebhooksCustomHeaders = JSON.parse(accountWebhooksCustomHeadersJson);
+            } catch (err) {
+                logger.debug({
+                    msg: 'Failed to parse custom webhook headers',
+                    action: 'webhook',
+                    event: job.name,
+                    account: job.data.account,
+                    json: accountWebhooksCustomHeadersJson,
+                    err
+                });
+            }
+        }
+
         if (!customRoute) {
             // custom routes have their own mappings
             let webhookEvents = (await settings.get('webhookEvents')) || [];
@@ -168,15 +266,18 @@ const notifyWorker = new Worker(
                     if (
                         (job.data.account && job.data.path === 'INBOX') ||
                         job.data.specialUse === '\\Inbox' ||
+                        (job.data.data && job.data.data.messageSpecialUse === '\\Inbox') ||
                         (job.data.data && job.data.data.labels && job.data.data.labels.includes('\\Inbox'))
                     ) {
                         isInbox = true;
                     }
 
-                    const inboxNewOnly = (await settings.get('inboxNewOnly')) || false;
-                    if (inboxNewOnly && !isInbox) {
-                        // ignore this message
-                        return;
+                    if (!isInbox) {
+                        const inboxNewOnly = (await settings.get('inboxNewOnly')) || false;
+                        if (inboxNewOnly) {
+                            // ignore this message
+                            return;
+                        }
                     }
 
                     break;
@@ -270,6 +371,12 @@ const notifyWorker = new Worker(
             }
         }
 
+        if (accountWebhooksCustomHeaders) {
+            for (let header of accountWebhooksCustomHeaders || []) {
+                headers[header.key] = header.value;
+            }
+        }
+
         let start = Date.now();
         let duration;
 
@@ -280,6 +387,14 @@ const notifyWorker = new Worker(
         }
         let body = Buffer.from(JSON.stringify(webhookPayload));
 
+        // Explicitly set Content-Length to prevent undici mismatch errors
+        headers['Content-Length'] = body.length.toString();
+
+        const serviceSecret = await getServiceSecret();
+        let hmac = createHmac('sha256', serviceSecret);
+        hmac.update(body);
+        headers['X-EE-Wh-Signature'] = hmac.digest('base64url');
+
         try {
             let res;
             try {
@@ -287,17 +402,23 @@ const notifyWorker = new Worker(
                     method: 'post',
                     body,
                     headers,
-                    dispatcher: fetchAgent
+                    dispatcher: retryAgent
                 });
                 duration = Date.now() - start;
             } catch (err) {
                 duration = Date.now() - start;
-                throw err;
+                throw err.cause || err;
             }
 
             if (!res.ok) {
-                let err = new Error(`Invalid response: ${res.status} ${res.statusText}`);
-                err.status = res.status;
+                // Drain response body to release connection back to pool
+                try {
+                    await res.text();
+                } catch {
+                    // ignore drain errors
+                }
+                let err = new Error(res.statusText || `Invalid response: ${res.status} ${res.statusText}`);
+                err.statusCode = res.status;
                 throw err;
             }
 
@@ -379,7 +500,9 @@ route: customRoute && customRoute.id,
                             event: job.name,
                             message: err.message,
                             time: Date.now(),
-                            url: customRoute.targetUrl
+                            url: customRoute.targetUrl,
+                            code: err.code,
+                            statusCode: err.statusCode
                         })
                     );
                 } else if (accountWebhooks) {
@@ -390,7 +513,9 @@ route: customRoute && customRoute.id,
                             event: job.name,
                             message: err.message,
                             time: Date.now(),
-                            url: webhooks
+                            url: webhooks,
+                            code: err.code,
+                            statusCode: err.statusCode
                         })
                     );
                 } else {
@@ -398,7 +523,9 @@ route: customRoute && customRoute.id,
                         event: job.name,
                         message: err.message,
                         time: Date.now(),
-                        url: webhooks
+                        url: webhooks,
+                        code: err.code,
+                        statusCode: err.statusCode
                     });
                 }
             } catch (err) {
@@ -419,7 +546,16 @@ route: customRoute && customRoute.id,
     },
     Object.assign(
         {
-            concurrency: Number(NOTIFY_QC) || 1
+            concurrency: Number(NOTIFY_QC) || 1,
+
+            // Webhook HTTP requests have 90s timeout, lock should exceed this
+            lockDuration: 3 * 60 * 1000, // 3 minutes
+
+            // Check for stalled jobs every 60 seconds
+            stalledInterval: 60 * 1000,
+
+            // Allow jobs to recover from stalled state up to 3 times
+            maxStalledCount: 3
         },
         queueConf || {}
     )
@@ -462,5 +598,14 @@ notifyWorker.on('failed', async job => {
         attemptsMade: job.attemptsMade
     });
 });
+
+googlePubSub
+    .start()
+    .then(() => {
+        logger.info({ msg: 'Started processing Google pub/sub' });
+    })
+    .catch(err => {
+        logger.fatal({ msg: 'Failed to start processing Google pub/sub', err });
+    });
 
 logger.info({ msg: 'Started Webhooks worker thread', version: packageData.version });

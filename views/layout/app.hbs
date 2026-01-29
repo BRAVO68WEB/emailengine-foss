@@ -6,10 +6,11 @@
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-    <meta name="description" content="EmailEngine Homepage" />
+    <meta name="description" content="EmailEngine Application page; The Ultimate Email API for Developers" />
     <meta name="author" content="Postal Systems OÜ">
 
-    <title>EmailEngine{{#if pageTitle}} &ndash; {{pageTitle}}{{/if}}</title>
+    <title>{{#if pageTitleFull}}{{pageTitleFull}}{{else}}{{pageBrandName}}{{#if pageTitle}} &ndash;
+        {{pageTitle}}{{/if}}{{/if}}</title>
 
     <link rel="apple-touch-icon" href="/static/favicon/apple-touch-icon.png" sizes="180x180" />
     <link rel="icon" href="/static/favicon/favicon-32x32.png" sizes="32x32" type="image/png" />
@@ -20,14 +21,16 @@
     <!-- Custom fonts for this template-->
     <link href="/static/vendor/fontawesome-free/css/all.min.css" rel="stylesheet" type="text/css">
 
-    <link
-        href="https://fonts.googleapis.com/css?family=Nunito:200,200i,300,300i,400,400i,600,600i,700,700i,800,800i,900,900i"
-        rel="stylesheet">
+    <link href="/static/fonts/nunito-font.css" rel="stylesheet">
 
     <link rel="stylesheet" href="/static/css/highlight.min.css">
 
     <link href="/static/css/sb-admin-2.min.css" rel="stylesheet">
     <link href="/static/css/app.css" rel="stylesheet">
+
+    {{#if injectHtmlHead}}
+    {{{injectHtmlHead}}}
+    {{/if}}
 
 </head>
 
@@ -91,6 +94,7 @@
                         method="get" action="{{searchTarget}}">
                         <div class="input-group">
 
+                            {{#if stateOptions}}
                             <div class="dropdown input-group-prepend">
                                 <a class="btn btn-light dropdown-toggle" href="#" role="button" data-toggle="dropdown"
                                     aria-expanded="false">
@@ -114,12 +118,14 @@
                                     {{/each}}
                                 </div>
                             </div>
+                            <input type="hidden" name="state" value="{{state}}">
+                            {{/if}}
 
                             <input type="text" class="form-control bg-light border-0 small"
                                 placeholder="{{searchPlaceholder}}" aria-label="Search" aria-describedby="basic-addon2"
                                 name="query" value="{{query}}">
 
-                            <input type="hidden" name="state" value="{{state}}">
+
 
                             <div class="input-group-append">
                                 <button class="btn btn-primary" type="submit">
@@ -330,10 +336,12 @@
             <footer class="sticky-footer bg-white">
                 <div class="container my-auto">
                     <div class="copyright text-center my-auto">
-                        <a href="{{packageData.homepage}}" target="_blank">EmailEngine</a> v{{packageData.version}}.
+                        <a href="{{packageData.homepage}}" target="_blank" rel="noopener noreferrer">EmailEngine</a>
+                        v{{packageData.version}}.
                         <span class="text-muted">&copy; 2020-{{currentYear}}</span>
 
-                        <a class="text-muted" href="https://postalsys.com/contact" target="_blank">Postal Systems
+                        <a class="text-muted" href="https://postalsys.com/contact" target="_blank"
+                            rel="noopener noreferrer">Postal Systems
                             O&Uuml;</a>.
                         <a class="" href="/admin/legal">
                             <i class="fas fa-fw fa-gavel"></i>
